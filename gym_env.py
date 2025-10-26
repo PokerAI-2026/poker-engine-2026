@@ -227,21 +227,28 @@ class PokerEnv(gym.Env):
         return drawn_card
 
     def reset(self, *, seed=None, options=None):
+        #you can merge these variables in if the class vars changes
+        #ex: BLIND_AMOUNT will probably just be a class variable
+        #I just don't know what its name is gonna be after 
+        #self.small_blind_amount and self.big_blind_amount change
+        NUM_PLAYERS = 6
+        DECK_SIZE = 52
+        HAND_SIZE = 5
+        BLIND_AMOUNT = 1
+
         """
         Resets the entire game.
         Default is random deal, but options can be provided to set the initial state.
 
         options is a dict with the following keys:
-        - cards: a list of 27 cards to be used in the game
+        - cards: a list of 52 cards to be used in the game
         """
         super().reset(seed=seed)
         self.street = 0
-        self.bets = [0, 0]
-        self.discarded_cards = [-1, -1]
-        self.drawn_cards = [-1, -1]
+        self.bets = [0] * NUM_PLAYERS
 
         # Set default values first
-        self.cards = np.arange(27)
+        self.cards = np.arange(DECK_SIZE)
         np.random.shuffle(self.cards)
         self.small_blind_player = 0  # Default to player 0
 
@@ -249,25 +256,25 @@ class PokerEnv(gym.Env):
         if options is not None:
             self.cards = options.get("cards", self.cards)
             self.small_blind_player = options.get("small_blind_player", self.small_blind_player)
-
-        self.big_blind_player = 1 - self.small_blind_player
             
         # Deal to players and community
-        self.player_cards = [[self._draw_card() for _ in range(2)] for _ in range(2)]
-        self.community_cards = [self._draw_card() for _ in range(5)]
+        self.player_cards = [[self._draw_card() for _ in range(HAND_SIZE)] for _ in range(NUM_PLAYERS)]
+        # community_cards starts as a 15-card list for all 3 boards
+        self.community_cards = [self._draw_card() for _ in range(15)]
 
         # Assign blinds
         self.acting_agent = self.small_blind_player
-        self.bets = [0, 0]
-        self.bets[self.small_blind_player] = self.small_blind_amount
-        self.bets[self.big_blind_player] = self.big_blind_amount
-        self.min_raise = self.big_blind_amount
-        self.last_street_bet = 0
+        self.bets = [BLIND_AMOUNT] * NUM_PLAYERS
+        self.min_raise = BLIND_AMOUNT
+        self.last_street_bet = BLIND_AMOUNT
 
-        obs0, info0 = self._get_single_player_obs(0)
-        obs1, info1 = self._get_single_player_obs(1)
+        obsListRaw = [self._get_single_player_obs(playerNum) for playerNum in range(NUM_PLAYERS)]
+        obsListFiltered = tuple(obsItem for (obsItem, _) in obsListRaw)
         info = {}
-        return (obs0, obs1), info
+
+        #Need to maintain the type of self.observationSpace to match this
+        #Right now they're both tuples - they need to stay coherent
+        return obsListFiltered, info
 
     def _next_street(self):
         """
