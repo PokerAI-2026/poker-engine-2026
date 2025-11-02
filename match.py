@@ -7,7 +7,7 @@ import json
 import logging
 import time
 import traceback
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, Optional, Tuple, List
 
 import numpy as np
 import requests
@@ -347,12 +347,87 @@ def play_hand(
 
 def play_hand(
     env: PokerEnv, 
-    base_urls: Tuple[str], # for 6 players
+    base_urls: List[str], # for 6 players
     logger: logging.Logger, 
     writer: csv.DictWriter, 
     hand_number: int
 ):
+    
     global bankrolls, time_used
+    
+    small_blind_player = hand_number % NUM_PLAYERS
+
+    # Initialize per-hand variables
+    observations, info = env.reset(options={"small_blind_player": small_blind_player})
+    info["hand_number"] = hand_number
+    
+    assert len(observations) == NUM_PLAYERS
+    
+    rewards = [0] * NUM_PLAYERS
+    terminated = truncated = False
+    
+    for i, obs in enumerate(observations):
+        obs["time_used"] = time_used[i]
+        obs["time_left"] = TIME_LIMIT_SECONDS - time_used[i]
+
+
+    # Loop until hand terminates
+    while not terminated:
+        # TODO keep logs for bot history inside state
+        action_start = -1.0
+        action = None
+        for player, (obs, url) in enumerate(zip(observations, base_urls)):
+            bot_payload = prepare_payload(obs, rewards[i], terminated, truncated, info)
+            if player == obs['acting_agent']:
+                action_start = time.time()
+                action = call_agent_api("GET", url, GET_ACTION_ENDPOINT, bot_payload, logger, player)
+                action_duration = time.time() - action_start
+                time_used[player] += action_duration
+                if time_used[player] > TIME_LIMIT_SECONDS:
+                    raise TimeoutError(f"Player {player} exceeded time limit")
+                              
+            # broadcast to other players
+            else:
+                # maybe do something with the return value? -dylan
+                call_agent_api("POST", url, SEND_OBS_ENDPOINT, bot_payload, logger, player)
+                
+        # TODO: Update log action to be consistent with 6-player game
+        # # Log action
+        # current_state = {
+        #     "hand_number": hand_number,
+        #     "street": get_street_name(obs0["street"]),
+        #     "active_team": obs0["acting_agent"],
+        #     "team_0_bankroll": bankrolls[0],
+        #     "team_1_bankroll": bankrolls[1],
+        #     "team_0_cards": [env.int_card_to_str(c) for c in env.player_cards[0] if c != -1],
+        #     "team_1_cards": [env.int_card_to_str(c) for c in env.player_cards[1] if c != -1],
+        #     "board_cards": [env.int_card_to_str(c) for c in env.community_cards[: obs0["street"] + 2] if c != -1],
+        #     "team_0_discarded": env.int_card_to_str(env.discarded_cards[0]) if env.discarded_cards[0] != -1 else "",
+        #     "team_1_discarded": env.int_card_to_str(env.discarded_cards[1]) if env.discarded_cards[1] != -1 else "",
+        #     "team_0_bet": obs0["my_bet"] if obs0["acting_agent"] == 0 else obs0["opp_bet"],
+        #     "team_1_bet": obs1["my_bet"] if obs1["acting_agent"] == 1 else obs1["opp_bet"],
+        #     "action_type": action_type.name,
+        #     "action_amount": action["action"][1],
+        # }
+        # writer.writerow(current_state)
+
+        # Step environment
+        (observations), (rewards), terminated, truncated, info = env.step(action=action["action"])
+        info["hand_number"] = hand_number  # Maintain hand number after each step
+        
+        for i, obs in enumerate(observations):
+            obs["time_used"] = time_used[i]
+            obs["time_left"] = TIME_LIMIT_SECONDS - time_used[i]
+
+    # game has terminated; prepare and send final observation
+    for player in range(NUM_PLAYERS):
+        obs, reward, url = observations[i], rewards[i], base_urls[i]
+        bot_payload = prepare_payload(obs, reward, terminated, truncated, info)
+        call_agent_api("POST", url, SEND_OBS_ENDPOINT, bot_payload, logger, player)
+
+    return {f"bot{player}_reward": rewards[player] for player in range(NUM_PLAYERS)}
+
+    
     
 def get_match_result(
     status: str,
