@@ -54,8 +54,6 @@ class AgentFailureTracker:
     def record_success(self, player_id: int):
         self.failed_attempts[player_id] = 0
 
-
-
 class AgentAPIClient:
     """Handles API communication with agents"""
     def __init__(
@@ -107,8 +105,55 @@ class AgentAPIClient:
                 self.logger.debug(f"Player {player_id} API call failed, retrying in {delay}s (attempt {attempt + 1}/{self.max_retries})")
                 time.sleep(delay)
 
+
+class PayloadPreparer:
+    """Prepares payloads for API calls"""
     
-    
+    @staticmethod
+    def convert_numpy(value: Any) -> Any:
+        """Recursively convert numpy types to Python native types"""
+        if isinstance(value, np.integer):
+            return int(value)
+        elif isinstance(value, np.floating):
+            return float(value)
+        elif isinstance(value, np.ndarray):
+            return value.tolist()
+        elif isinstance(value, dict):
+            return {k: PayloadPreparer.convert_numpy(v) for k, v in value.items()}
+        elif isinstance(value, list):
+            return [PayloadPreparer.convert_numpy(item) for item in value]
+        return value
+
+    @staticmethod
+    def prepare(
+        obs: Dict[str, Any],
+        reward: float,
+        terminated: bool,
+        truncated: bool,
+        info: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """
+        Prepare the payload for API calls by converting numpy arrays and values to Python native types.
+
+        Args:
+            obs (Dict[str, Any]): The observation dictionary.
+            reward (float): The reward value.
+            terminated (bool): Whether the episode has terminated.
+            truncated (bool): Whether the episode has been truncated.
+            info (Dict[str, Any]): Additional information.
+
+        Returns:
+            Dict[str, Any]: The prepared payload.
+        """
+        return {
+            "observation": {k: PayloadPreparer.convert_numpy(v) for k, v in obs.items()},
+            "reward": float(reward),
+            "terminated": terminated,
+            "truncated": truncated,
+            "info": PayloadPreparer.convert_numpy(info),
+        }
+
+
 class PokerMatch:
     """Manages a complete poker match between multiple agents"""
     def __init__(
@@ -148,52 +193,6 @@ def get_street_name(street_num: int) -> str:
     """Convert numeric street value to human-readable name"""
     street_names = {0: "Pre-Flop", 1: "Flop", 2: "Turn", 3: "River"}
     return street_names.get(street_num, f"Unknown-{street_num}")
-
-
-def prepare_payload(
-    obs: Dict[str, Any],
-    reward: float,
-    terminated: bool,
-    truncated: bool,
-    info: Dict[str, Any],
-) -> Dict[str, Any]:
-    """
-    Prepare the payload for API calls by converting numpy arrays and values to Python native types.
-
-    Args:
-        obs (Dict[str, Any]): The observation dictionary.
-        reward (float): The reward value.
-        terminated (bool): Whether the episode has terminated.
-        truncated (bool): Whether the episode has been truncated.
-        info (Dict[str, Any]): Additional information.
-
-    Returns:
-        Dict[str, Any]: The prepared payload.
-    """
-
-    def _convert_numpy(v):
-        if isinstance(v, np.integer):
-            return int(v)
-        elif isinstance(v, np.floating):
-            return float(v)
-        elif isinstance(v, np.ndarray):
-            return v.tolist()
-        elif isinstance(v, dict):
-            return {k: _convert_numpy(val) for k, val in v.items()}
-        elif isinstance(v, list):
-            return [_convert_numpy(item) for item in v]
-        return v
-
-    def _prepare_observation(observation: Dict[str, Any]) -> Dict[str, Any]:
-        return {k: _convert_numpy(v) for k, v in observation.items()}
-
-    return {
-        "observation": _prepare_observation(obs),
-        "reward": float(reward),
-        "terminated": terminated,
-        "truncated": truncated,
-        "info": _convert_numpy(info),
-    }
 
 
 def call_agent_api(
