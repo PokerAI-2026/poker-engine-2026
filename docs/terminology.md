@@ -14,7 +14,7 @@ A match consists of 1000 hands between two bots. The bot with the most chips at 
 A single poker hand is one complete round of play, from dealing cards to awarding the pot. Each hand:
 
 - Starts with dealing hole cards
-- Progresses through up to 4 betting streets
+- Progresses through up to 5 betting streets
 - Ends when either:
   - One player folds
   - All betting is complete and remaining players show their cards (showdown)
