@@ -1,4 +1,4 @@
-# PokerBotEngine2025
+# PokerBotEngine2026
 
 ## How to run the engine
 
