@@ -5,6 +5,7 @@ description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
+    "pytest-cov>=4.0.0",
     "annotated-doc==0.0.3",
     "annotated-types==0.7.0",
     "anyio==4.11.0",
