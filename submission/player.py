@@ -1,16 +1,25 @@
-from agents.agent import Agent
+from typing import Any, Tuple
+
+from agents.agent import Agent, Observation
 from gym_env import PokerEnv
 
 
 class PlayerAgent(Agent):
-    def __init__(self, stream: bool = True):
+    def __init__(self, stream: bool = True) -> None:
         super().__init__(stream)
         self.action_types = PokerEnv.ActionType
 
-    def __name__(self):
+    def __name__(self) -> str:
         return "PlayerAgent"
 
-    def act(self, observation, reward, terminated, truncated, info):
+    def act(
+        self,
+        observation: Observation,
+        reward: float,
+        terminated: bool,
+        truncated: bool,
+        info: Any,
+    ) -> Tuple[int, int, int, int]:
         """
         Starter: Folds whenever possible. On the flop discard round (mandatory), keeps first two cards.
 
