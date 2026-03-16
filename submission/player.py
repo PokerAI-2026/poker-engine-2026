@@ -22,34 +22,13 @@ class PlayerAgent(Agent):
         self.action_types = PokerEnv.ActionType
         self.base_margin = 0.05
 
-        self.preflop_policy_v2 = os.getenv("POLICY_PREFLOP_V2", "1").lower() not in {
-            "0",
-            "false",
-            "off",
-        }
-        self.adaptive_model_v2 = os.getenv("ADAPTIVE_MODEL_V2", "1").lower() not in {
-            "0",
-            "false",
-            "off",
-        }
-        self.street_margin_v2 = os.getenv("STREET_MARGIN_V2", "1").lower() not in {
-            "0",
-            "false",
-            "off",
-        }
-
         data_dir = Path(__file__).resolve().parent / "data"
         self.luts = LUTStore(data_dir)
         self.state_manager = StateManager()
         self.time_supervisor = TimeSupervisor(total_hands=1000)
         self.opponent_model = OpponentModel()
         self.discard_engine = DiscardEngine(self.luts)
-        self.decision_engine = DecisionEngine(
-            self.action_types,
-            preflop_policy_v2=self.preflop_policy_v2,
-            adaptive_model_v2=self.adaptive_model_v2,
-            street_margin_v2=self.street_margin_v2,
-        )
+        self.decision_engine = DecisionEngine(self.action_types)
 
         player_id = os.getenv("PLAYER_ID", "0")
         self.player_id = int(player_id) if player_id.isdigit() else 0
@@ -112,7 +91,9 @@ class PlayerAgent(Agent):
         if state.street == 0 and len(state.my_cards) >= 5:
             premium = self.luts.is_premium_preflop(state.my_cards[:5])
             if premium:
-                if state.continue_cost > 0 and self._is_valid(state.valid_actions, call):
+                if state.continue_cost > 0 and self._is_valid(
+                    state.valid_actions, call
+                ):
                     return (call, 0, 0, 0)
                 if self._is_valid(state.valid_actions, check):
                     return (check, 0, 0, 0)
@@ -123,7 +104,10 @@ class PlayerAgent(Agent):
                     return (check, 0, 0, 0)
                 if self._is_valid(state.valid_actions, fold):
                     return (fold, 0, 0, 0)
-                if self._is_valid(state.valid_actions, call) and state.continue_cost == 0:
+                if (
+                    self._is_valid(state.valid_actions, call)
+                    and state.continue_cost == 0
+                ):
                     return (call, 0, 0, 0)
         else:
             if self._is_valid(state.valid_actions, check):
@@ -141,15 +125,19 @@ class PlayerAgent(Agent):
         info: Any,
     ) -> Tuple[int, int, int, int]:
         try:
-            state = self.state_manager.parse(observation, info if isinstance(info, dict) else {})
+            state = self.state_manager.parse(
+                observation, info if isinstance(info, dict) else {}
+            )
             self.opponent_model.record_state(state)
 
             mode, tavg = self.time_supervisor.select_mode(state)
             self.current_mode = mode
 
             if state.can_discard:
-                discard_mode = "fast" if mode == "survival" else mode
-                action, discard_ev = self.discard_engine.choose_discard(state, discard_mode)
+                discard_mode = "survival" if mode == "survival" else mode
+                action, discard_ev = self.discard_engine.choose_discard(
+                    state, discard_mode
+                )
                 self.logger.debug(
                     "Hand %s discard mode=%s tavg=%.3f ev=%.3f action=%s",
                     state.hand_number,
@@ -158,16 +146,23 @@ class PlayerAgent(Agent):
                     discard_ev,
                     action,
                 )
-                return self._validated_action(action, state.valid_actions, state.min_raise, state.max_raise)
+                return self._validated_action(
+                    action, state.valid_actions, state.min_raise, state.max_raise
+                )
 
             if mode == "survival":
                 return self._validated_action(
-                    self._survival_action(state), state.valid_actions, state.min_raise, state.max_raise
+                    self._survival_action(state),
+                    state.valid_actions,
+                    state.min_raise,
+                    state.max_raise,
                 )
 
             opponent_range = None
             if mode == "full":
-                opponent_range = self.discard_engine.narrowed_opponent_range(state, mode)
+                opponent_range = self.discard_engine.narrowed_opponent_range(
+                    state, mode
+                )
 
             if state.street == 0 and len(state.my_cards) >= 5:
                 my_ev = self.luts.get_preflop_equity(state.my_cards[:5])
@@ -183,39 +178,25 @@ class PlayerAgent(Agent):
                 my_ev = 0.5
 
             margin = self.opponent_model.get_margin(self.base_margin)
-            opponent_stats = (
-                self.opponent_model.get_stats() if self.adaptive_model_v2 else None
-            )
-            action = self.decision_engine.decide(
-                state,
-                my_ev,
-                margin,
-                mode,
-                opponent_stats=opponent_stats,
-            )
-            action = self._validated_action(
-                action, state.valid_actions, state.min_raise, state.max_raise
-            )
-            self.opponent_model.record_hero_action(
-                state, action, self.action_types.RAISE.value
-            )
+            action = self.decision_engine.decide(state, my_ev, margin, mode)
             self.logger.debug(
-                "Hand %s street=%s mode=%s tavg=%.3f ev=%.3f margin=%.3f policy(v2,pref=%s,adapt=%s,street=%s) action=%s",
+                "Hand %s street=%s mode=%s tavg=%.3f ev=%.3f margin=%.3f action=%s",
                 state.hand_number,
                 state.street,
                 mode,
                 tavg,
                 my_ev,
                 margin,
-                self.preflop_policy_v2,
-                self.adaptive_model_v2,
-                self.street_margin_v2,
                 action,
             )
-            return action
+            return self._validated_action(
+                action, state.valid_actions, state.min_raise, state.max_raise
+            )
         except Exception as exc:
             self.logger.exception("act() failure: %s", exc)
-            valid_actions = tuple(int(v) for v in observation.get("valid_actions", [1, 0, 0, 0, 0]))
+            valid_actions = tuple(
+                int(v) for v in observation.get("valid_actions", [1, 0, 0, 0, 0])
+            )
             return self._safe_action(valid_actions)
 
     def observe(
@@ -227,10 +208,13 @@ class PlayerAgent(Agent):
         info: Any,
     ) -> None:
         try:
-            state = self.state_manager.parse(observation, info if isinstance(info, dict) else {})
+            state = self.state_manager.parse(
+                observation, info if isinstance(info, dict) else {}
+            )
             self.opponent_model.record_state(state)
             if terminated:
-                self.opponent_model.finalize_hand(state, info if isinstance(info, dict) else {})
+                self.opponent_model.finalize_hand(
+                    state, info if isinstance(info, dict) else {}
+                )
         except Exception as exc:
             self.logger.exception("observe() failure: %s", exc)
-

@@ -4,7 +4,7 @@ import random
 from collections import deque
 from dataclasses import dataclass
 from itertools import combinations
-from typing import Any, Sequence
+from typing import Any, Iterable, Sequence
 
 from submission.lut_store import KEEP_INDEX_PAIRS, LUTStore, N_CARDS, pack_flop_key
 
@@ -31,17 +31,6 @@ class ParsedState:
     @property
     def continue_cost(self) -> int:
         return max(0, self.opp_bet - self.my_bet)
-
-
-@dataclass(frozen=True)
-class OpponentStats:
-    hands_observed: int
-    vpip_rate: float
-    pfr_rate: float
-    cbet_rate: float
-    preflop_raise_rate: float
-    fold_to_3bet_rate: float
-    river_raise_rate: float
 
 
 class StateManager:
@@ -123,12 +112,6 @@ class OpponentModel:
         self.pfr_count = 0
         self.cbet_count = 0
         self.cbet_opportunities = 0
-        self.preflop_raise_count = 0
-        self.preflop_raise_opportunities = 0
-        self.fold_to_3bet_count = 0
-        self.fold_to_3bet_opportunities = 0
-        self.river_raise_count = 0
-        self.river_raise_opportunities = 0
         self.showdown_count = 0
         self.showdown_aggressive_count = 0
 
@@ -137,10 +120,6 @@ class OpponentModel:
         self._hand_pfr = False
         self._hand_opp_preflop_aggressor = False
         self._hand_cbet = False
-        self._hand_hero_3bet = False
-        self._hand_opp_folded_to_3bet = False
-        self._hand_saw_river_action = False
-        self._hand_river_raise = False
         self._last_event_token: tuple[int, int, str, int, int] | None = None
         self._finalized_hands: set[int] = set()
 
@@ -152,22 +131,7 @@ class OpponentModel:
         self._hand_pfr = False
         self._hand_opp_preflop_aggressor = False
         self._hand_cbet = False
-        self._hand_hero_3bet = False
-        self._hand_opp_folded_to_3bet = False
-        self._hand_saw_river_action = False
-        self._hand_river_raise = False
         self._last_event_token = None
-
-    def record_hero_action(
-        self, state: ParsedState, action: tuple[int, int, int, int], raise_idx: int
-    ) -> None:
-        self._ensure_hand(state.hand_number)
-        action_type = int(action[0])
-        if state.street != 0 or action_type != raise_idx:
-            return
-        # Hero raising while facing an existing preflop bet is our 3-bet marker.
-        if state.opp_bet > state.my_bet:
-            self._hand_hero_3bet = True
 
     def record_state(self, state: ParsedState) -> None:
         self._ensure_hand(state.hand_number)
@@ -187,12 +151,6 @@ class OpponentModel:
             self._hand_opp_preflop_aggressor = True
         if state.street == 1 and self._hand_opp_preflop_aggressor and action == "RAISE":
             self._hand_cbet = True
-        if state.street == 0 and action == "FOLD" and self._hand_hero_3bet:
-            self._hand_opp_folded_to_3bet = True
-        if state.street == 3:
-            self._hand_saw_river_action = True
-            if action == "RAISE":
-                self._hand_river_raise = True
 
     def finalize_hand(self, state: ParsedState, info: dict[str, Any] | None) -> None:
         hand_number = state.hand_number
@@ -202,17 +160,9 @@ class OpponentModel:
         self.hands_observed += 1
         self.vpip_count += int(self._hand_vpip)
         self.pfr_count += int(self._hand_pfr)
-        self.preflop_raise_opportunities += 1
-        self.preflop_raise_count += int(self._hand_pfr)
         if self._hand_opp_preflop_aggressor:
             self.cbet_opportunities += 1
             self.cbet_count += int(self._hand_cbet)
-        if self._hand_hero_3bet:
-            self.fold_to_3bet_opportunities += 1
-            self.fold_to_3bet_count += int(self._hand_opp_folded_to_3bet)
-        if self._hand_saw_river_action:
-            self.river_raise_opportunities += 1
-            self.river_raise_count += int(self._hand_river_raise)
 
         info = info or {}
         if "player_0_cards" in info and "player_1_cards" in info:
@@ -220,45 +170,31 @@ class OpponentModel:
             if self._hand_pfr or self._hand_cbet:
                 self.showdown_aggressive_count += 1
 
-    def get_stats(self) -> OpponentStats:
-        hands = max(1, self.hands_observed)
-        cbet_rate = (
-            self.cbet_count / max(1, self.cbet_opportunities)
-            if self.cbet_opportunities
-            else 0.0
-        )
-        return OpponentStats(
-            hands_observed=self.hands_observed,
-            vpip_rate=self.vpip_count / hands,
-            pfr_rate=self.pfr_count / hands,
-            cbet_rate=cbet_rate,
-            preflop_raise_rate=self.preflop_raise_count
-            / max(1, self.preflop_raise_opportunities),
-            fold_to_3bet_rate=self.fold_to_3bet_count
-            / max(1, self.fold_to_3bet_opportunities),
-            river_raise_rate=self.river_raise_count
-            / max(1, self.river_raise_opportunities),
-        )
-
     def get_margin(self, base_margin: float = 0.05) -> float:
         if self.hands_observed == 0:
             return base_margin
 
-        stats = self.get_stats()
+        vpip = self.vpip_count / max(1, self.hands_observed)
+        pfr = self.pfr_count / max(1, self.hands_observed)
+        cbet = (
+            self.cbet_count / max(1, self.cbet_opportunities)
+            if self.cbet_opportunities
+            else 0.0
+        )
 
         margin = base_margin
-        if stats.vpip_rate > 0.80 and stats.pfr_rate > 0.45:
+        if vpip > 0.80 and pfr > 0.45:
             margin -= 0.02
-        if stats.pfr_rate < 0.20:
+        if pfr < 0.20:
             margin += 0.03
-        if stats.cbet_rate > 0.70:
+        if cbet > 0.70:
             margin += 0.01
         return max(0.02, min(0.15, margin))
 
 
 class DiscardEngine:
     def __init__(
-        self, luts: LUTStore, full_samples: int = 500, fast_samples: int = 250
+        self, luts: LUTStore, full_samples: int = 375, fast_samples: int = 200
     ) -> None:
         self.luts = luts
         self.full_samples = full_samples
@@ -464,20 +400,8 @@ class DiscardEngine:
 
 
 class DecisionEngine:
-    def __init__(
-        self,
-        action_types: Any,
-        *,
-        preflop_policy_v2: bool = True,
-        adaptive_model_v2: bool = True,
-        street_margin_v2: bool = True,
-        rng_seed: int = 2026,
-    ) -> None:
+    def __init__(self, action_types: Any) -> None:
         self.action_types = action_types
-        self.preflop_policy_v2 = preflop_policy_v2
-        self.adaptive_model_v2 = adaptive_model_v2
-        self.street_margin_v2 = street_margin_v2
-        self._rng = random.Random(rng_seed)
 
     def _is_valid(self, state: ParsedState, action_idx: int) -> bool:
         return 0 <= action_idx < len(state.valid_actions) and bool(
@@ -490,201 +414,27 @@ class DecisionEngine:
             return lo
         return max(lo, min(hi, value))
 
-    def _raise_amount(
-        self,
-        state: ParsedState,
-        edge: float,
-        mode: str,
-        *,
-        preflop_aggressive: bool = False,
-    ) -> int:
+    def _raise_amount(self, state: ParsedState, edge: float, mode: str) -> int:
         if state.max_raise <= 0:
             return 0
-        if state.street == 0:
-            factor = 0.80 if preflop_aggressive else 0.60
-        elif mode == "full":
-            factor = 0.48
+        if mode == "full":
+            factor = 0.50
         elif mode == "fast":
-            factor = 0.38
+            factor = 0.40
         else:
             factor = 0.30
         if edge > 0.35:
             factor += 0.15
-        elif edge > 0.20:
-            factor += 0.05
         raw = int(round(max(2, state.pot_size) * factor))
         return self._clamp(raw, state.min_raise, state.max_raise)
 
-    @staticmethod
-    def _cost_bucket(continue_cost: int, pot: int) -> str:
-        ratio = continue_cost / max(1, pot)
-        if ratio <= 0.35:
-            return "small"
-        if ratio <= 0.75:
-            return "medium"
-        return "large"
-
-    def _roll(self, probability: float) -> bool:
-        return self._rng.random() < max(0.0, min(1.0, probability))
-
-    def _street_margin(
-        self,
-        state: ParsedState,
-        base_margin: float,
-        stats: OpponentStats | None,
-    ) -> float:
-        if not self.street_margin_v2:
-            return base_margin
-
-        if state.street == 0:
-            margin = base_margin - 0.012
-        elif state.street == 1:
-            margin = base_margin
-        elif state.street == 2:
-            margin = base_margin + 0.004
-        else:
-            margin = base_margin + 0.009
-
-        if self.adaptive_model_v2 and stats is not None and stats.hands_observed >= 40:
-            if stats.preflop_raise_rate > 0.62 and state.street == 0:
-                margin -= 0.010
-            if stats.cbet_rate > 0.68 and state.street == 1:
-                margin += 0.008
-            if stats.river_raise_rate > 0.32 and state.street == 3:
-                margin += 0.010
-
-        return max(0.02, min(0.18, margin))
-
-    def _preflop_decide(
-        self,
-        state: ParsedState,
-        my_ev: float,
-        margin: float,
-        mode: str,
-        stats: OpponentStats | None,
-    ) -> tuple[int, int, int, int] | None:
-        if state.street != 0 or not self.preflop_policy_v2:
-            return None
-
-        fold = self.action_types.FOLD.value
-        raise_action = self.action_types.RAISE.value
-        check = self.action_types.CHECK.value
-        call = self.action_types.CALL.value
-
-        continue_cost = state.continue_cost
-        pot = max(1, state.pot_size)
-        can_raise = self._is_valid(state, raise_action)
-        can_call = self._is_valid(state, call)
-        can_check = self._is_valid(state, check)
-        can_fold = self._is_valid(state, fold)
-
-        # Blind position in env observations: 1 -> big blind, 0 -> small blind.
-        is_big_blind = state.blind_position == 1
-        preflop_raise_rate = stats.preflop_raise_rate if stats is not None else 0.5
-        fold_to_3bet = stats.fold_to_3bet_rate if stats is not None else 0.35
-
-        if continue_cost == 0:
-            open_threshold = 0.54 if is_big_blind else 0.56
-            if self.adaptive_model_v2 and preflop_raise_rate > 0.60:
-                open_threshold -= 0.02
-
-            if can_raise and my_ev >= open_threshold:
-                if my_ev >= 0.76:
-                    raise_freq = 1.0
-                elif my_ev >= 0.68:
-                    raise_freq = 0.80
-                elif my_ev >= 0.60:
-                    raise_freq = 0.58
-                else:
-                    raise_freq = 0.34
-
-                if self._roll(raise_freq):
-                    return (
-                        raise_action,
-                        self._raise_amount(
-                            state, my_ev - 0.5, mode, preflop_aggressive=(my_ev >= 0.70)
-                        ),
-                        0,
-                        0,
-                    )
-            if can_check:
-                return (check, 0, 0, 0)
-            if can_call:
-                return (call, 0, 0, 0)
-            if can_fold:
-                return (fold, 0, 0, 0)
-            return None
-
-        pot_odds = continue_cost / (pot + continue_cost)
-        cost_bucket = self._cost_bucket(continue_cost, pot)
-        defend_floor = {
-            True: {"small": 0.45, "medium": 0.35, "large": 0.24},
-            False: {"small": 0.34, "medium": 0.26, "large": 0.18},
-        }[is_big_blind][cost_bucket]
-        if self.adaptive_model_v2:
-            if preflop_raise_rate > 0.62:
-                defend_floor += 0.08
-            if preflop_raise_rate > 0.72:
-                defend_floor += 0.05
-        defend_floor = min(0.72, defend_floor)
-
-        value_3bet = can_raise and my_ev >= (0.73 if cost_bucket == "large" else 0.70)
-        bluff_3bet_freq = 0.02
-        if self.adaptive_model_v2:
-            if fold_to_3bet > 0.52:
-                bluff_3bet_freq += 0.06
-            if preflop_raise_rate > 0.60:
-                bluff_3bet_freq += 0.03
-
-        if can_raise and (value_3bet or (my_ev >= 0.56 and self._roll(bluff_3bet_freq))):
-            return (
-                raise_action,
-                self._raise_amount(
-                    state,
-                    my_ev - 0.5,
-                    mode,
-                    preflop_aggressive=True,
-                ),
-                0,
-                0,
-            )
-
-        call_edge = pot_odds + margin
-        call_ok = my_ev >= call_edge
-        # Defend floor: allow marginal continues with bounded randomization.
-        if not call_ok and my_ev >= max(0.36, pot_odds - 0.10):
-            call_ok = self._roll(defend_floor * 0.50)
-
-        if call_ok and can_call:
-            return (call, 0, 0, 0)
-        if can_fold:
-            return (fold, 0, 0, 0)
-        if can_check:
-            return (check, 0, 0, 0)
-        if can_call:
-            return (call, 0, 0, 0)
-        return None
-
     def decide(
-        self,
-        state: ParsedState,
-        my_ev: float,
-        base_margin: float,
-        mode: str,
-        opponent_stats: OpponentStats | None = None,
+        self, state: ParsedState, my_ev: float, margin: float, mode: str
     ) -> tuple[int, int, int, int]:
         fold = self.action_types.FOLD.value
         raise_action = self.action_types.RAISE.value
         check = self.action_types.CHECK.value
         call = self.action_types.CALL.value
-
-        margin = self._street_margin(state, base_margin, opponent_stats)
-
-        preflop_action = self._preflop_decide(
-            state, my_ev, margin, mode, opponent_stats
-        )
-        if preflop_action is not None:
-            return preflop_action
 
         continue_cost = state.continue_cost
         pot = max(1, state.pot_size)
@@ -715,7 +465,7 @@ class DecisionEngine:
         discount = max(0.65, 1.0 - 0.25 * bet_ratio)
         effective_ev = my_ev * discount
 
-        if my_ev > 0.79 and self._is_valid(state, raise_action):
+        if my_ev > 0.80 and self._is_valid(state, raise_action):
             return (raise_action, self._raise_amount(state, my_ev - 0.5, mode), 0, 0)
         if effective_ev >= (pot_odds + margin) and self._is_valid(state, call):
             return (call, 0, 0, 0)
