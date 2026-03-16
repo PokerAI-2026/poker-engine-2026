@@ -15,11 +15,14 @@ from agents.test_agents import CallingStationAgent, FoldAgent, RandomAgent
 from gym_env import PokerEnv
 
 # Suppress noisy Streamlit bare-mode warning spam.
-logging.getLogger("streamlit.runtime.scriptrunner_utils.script_run_context").setLevel(logging.ERROR)
+logging.getLogger("streamlit.runtime.scriptrunner_utils.script_run_context").setLevel(
+    logging.ERROR
+)
 warnings.filterwarnings("ignore", message=".*ScriptRunContext.*")
 
 try:
     from submission.player import PlayerAgent
+
     PLAYER_AGENT_AVAILABLE = True
 except ImportError:
     PlayerAgent = None  # type: ignore
@@ -191,7 +194,9 @@ def _init_state() -> None:
             st.session_state[k] = v
 
 
-def _new_hand(name0: str, name1: str, seed: int | None, reset_match: bool = False) -> None:
+def _new_hand(
+    name0: str, name1: str, seed: int | None, reset_match: bool = False
+) -> None:
     if reset_match:
         st.session_state.match_total_0 = 0.0
         st.session_state.match_total_1 = 0.0
@@ -223,7 +228,9 @@ def _new_hand(name0: str, name1: str, seed: int | None, reset_match: bool = Fals
     st.session_state.hand_scored = False
 
 
-def _apply_action(action: Tuple[int, int, int, int], actor_label: str, action_name: str) -> None:
+def _apply_action(
+    action: Tuple[int, int, int, int], actor_label: str, action_name: str
+) -> None:
     env = st.session_state.env
     obs0 = st.session_state.obs0
     obs1 = st.session_state.obs1
@@ -287,8 +294,12 @@ def main() -> None:
 
     with st.sidebar:
         st.subheader("Setup")
-        name0 = st.selectbox("Player 0 (SB)", list(AGENT_CHOICES.keys()), key="select_agent0")
-        name1 = st.selectbox("Player 1 (BB)", list(AGENT_CHOICES.keys()), key="select_agent1")
+        name0 = st.selectbox(
+            "Player 0 (SB)", list(AGENT_CHOICES.keys()), key="select_agent0"
+        )
+        name1 = st.selectbox(
+            "Player 1 (BB)", list(AGENT_CHOICES.keys()), key="select_agent1"
+        )
 
         use_seed = st.checkbox("Use fixed seed", value=False)
         seed_val = st.number_input("Seed", min_value=0, value=0, step=1)
@@ -353,9 +364,11 @@ def main() -> None:
     cards = {0: list(env.player_cards[0]), 1: list(env.player_cards[1])}
 
     # Opponent card visibility toggle
-    reveal_opp = st.session_state.show_opponent_cards or terminated or human_seat is None
+    reveal_opp = (
+        st.session_state.show_opponent_cards or terminated or human_seat is None
+    )
 
-    top_hidden = (human_seat is not None and top_seat != human_seat and not reveal_opp)
+    top_hidden = human_seat is not None and top_seat != human_seat and not reveal_opp
     bottom_hidden = False  # always show "you" (or both in bot mode)
 
     # Board cards revealed by street
@@ -376,11 +389,19 @@ def main() -> None:
     st.markdown('<div class="table-wrap">', unsafe_allow_html=True)
 
     # Top seat
-    st.markdown(f'<div class="seat-title">{names[top_seat]} · Bet: {bets[top_seat]}</div>', unsafe_allow_html=True)
-    st.markdown(_cards_html_from_ints(env, cards[top_seat], hidden=top_hidden), unsafe_allow_html=True)
+    st.markdown(
+        f'<div class="seat-title">{names[top_seat]} · Bet: {bets[top_seat]}</div>',
+        unsafe_allow_html=True,
+    )
+    st.markdown(
+        _cards_html_from_ints(env, cards[top_seat], hidden=top_hidden),
+        unsafe_allow_html=True,
+    )
 
     st.markdown('<div class="table-meta">Board</div>', unsafe_allow_html=True)
-    st.markdown(_cards_html_from_ints(env, board_cards, hidden=False), unsafe_allow_html=True)
+    st.markdown(
+        _cards_html_from_ints(env, board_cards, hidden=False), unsafe_allow_html=True
+    )
 
     # Discard visibility after flop-discard phase starts
     disc0 = [c for c in env.discarded_cards[0] if c != -1]
@@ -388,33 +409,58 @@ def main() -> None:
     if disc0 or disc1:
         d1, d2 = st.columns(2)
         with d1:
-            st.markdown(f"<div class='small-note'>P0 discarded</div>", unsafe_allow_html=True)
-            st.markdown(_cards_html_from_ints(env, disc0, hidden=False), unsafe_allow_html=True)
+            st.markdown(
+                f"<div class='small-note'>P0 discarded</div>", unsafe_allow_html=True
+            )
+            st.markdown(
+                _cards_html_from_ints(env, disc0, hidden=False), unsafe_allow_html=True
+            )
         with d2:
-            st.markdown(f"<div class='small-note'>P1 discarded</div>", unsafe_allow_html=True)
-            st.markdown(_cards_html_from_ints(env, disc1, hidden=False), unsafe_allow_html=True)
+            st.markdown(
+                f"<div class='small-note'>P1 discarded</div>", unsafe_allow_html=True
+            )
+            st.markdown(
+                _cards_html_from_ints(env, disc1, hidden=False), unsafe_allow_html=True
+            )
 
-    st.markdown(f'<div class="seat-title" style="margin-top:10px;">{names[bottom_seat]} · Bet: {bets[bottom_seat]}</div>', unsafe_allow_html=True)
-    st.markdown(_cards_html_from_ints(env, cards[bottom_seat], hidden=bottom_hidden), unsafe_allow_html=True)
+    st.markdown(
+        f'<div class="seat-title" style="margin-top:10px;">{names[bottom_seat]} · Bet: {bets[bottom_seat]}</div>',
+        unsafe_allow_html=True,
+    )
+    st.markdown(
+        _cards_html_from_ints(env, cards[bottom_seat], hidden=bottom_hidden),
+        unsafe_allow_html=True,
+    )
 
-    st.markdown('</div>', unsafe_allow_html=True)
+    st.markdown("</div>", unsafe_allow_html=True)
 
     # Hand completion / scoreboard
     if terminated:
-        st.success(f"Hand finished: P0 {st.session_state.reward0:+.0f}, P1 {st.session_state.reward1:+.0f}")
+        st.success(
+            f"Hand finished: P0 {st.session_state.reward0:+.0f}, P1 {st.session_state.reward1:+.0f}"
+        )
         info = st.session_state.info
         if "player_0_cards" in info:
             st.write("Showdown")
             s1, s2, s3 = st.columns(3)
             with s1:
                 st.markdown("**P0 hole cards**")
-                st.markdown(_cards_html_from_strs(info.get("player_0_cards", [])), unsafe_allow_html=True)
+                st.markdown(
+                    _cards_html_from_strs(info.get("player_0_cards", [])),
+                    unsafe_allow_html=True,
+                )
             with s2:
                 st.markdown("**Board**")
-                st.markdown(_cards_html_from_strs(info.get("community_cards", [])), unsafe_allow_html=True)
+                st.markdown(
+                    _cards_html_from_strs(info.get("community_cards", [])),
+                    unsafe_allow_html=True,
+                )
             with s3:
                 st.markdown("**P1 hole cards**")
-                st.markdown(_cards_html_from_strs(info.get("player_1_cards", [])), unsafe_allow_html=True)
+                st.markdown(
+                    _cards_html_from_strs(info.get("player_1_cards", [])),
+                    unsafe_allow_html=True,
+                )
 
         s1, s2 = st.columns(2)
         s1.metric("Match total P0", f"{st.session_state.match_total_0:+.0f}")
@@ -436,12 +482,29 @@ def main() -> None:
 
             if valid[At.DISCARD.value]:
                 my_cards = [c for c in obs_human["my_cards"] if c != -1]
-                labels = [f"{_card_from_int(env, c)[0]}{_card_from_int(env, c)[1]} (index {i})" for i, c in enumerate(my_cards)]
-                k1 = st.selectbox("Keep card 1", list(range(len(my_cards))), format_func=lambda i: labels[i], key="keep_1")
+                labels = [
+                    f"{_card_from_int(env, c)[0]}{_card_from_int(env, c)[1]} (index {i})"
+                    for i, c in enumerate(my_cards)
+                ]
+                k1 = st.selectbox(
+                    "Keep card 1",
+                    list(range(len(my_cards))),
+                    format_func=lambda i: labels[i],
+                    key="keep_1",
+                )
                 k2_choices = [i for i in range(len(my_cards)) if i != k1]
-                k2 = st.selectbox("Keep card 2", k2_choices, format_func=lambda i: labels[i], key="keep_2")
+                k2 = st.selectbox(
+                    "Keep card 2",
+                    k2_choices,
+                    format_func=lambda i: labels[i],
+                    key="keep_2",
+                )
                 if st.button("Submit discard", use_container_width=True):
-                    _apply_action((At.DISCARD.value, 0, int(k1), int(k2)), f"P{human_seat}", "DISCARD")
+                    _apply_action(
+                        (At.DISCARD.value, 0, int(k1), int(k2)),
+                        f"P{human_seat}",
+                        "DISCARD",
+                    )
                     st.rerun()
             else:
                 min_raise = int(obs_human["min_raise"])
@@ -449,25 +512,52 @@ def main() -> None:
                 c1, c2, c3, c4 = st.columns(4)
 
                 with c1:
-                    if valid[At.FOLD.value] and st.button("Fold", use_container_width=True):
-                        _apply_action((At.FOLD.value, 0, 0, 0), f"P{human_seat}", "FOLD")
+                    if valid[At.FOLD.value] and st.button(
+                        "Fold", use_container_width=True
+                    ):
+                        _apply_action(
+                            (At.FOLD.value, 0, 0, 0), f"P{human_seat}", "FOLD"
+                        )
                         st.rerun()
                 with c2:
-                    if valid[At.CALL.value] and st.button("Call", use_container_width=True):
-                        _apply_action((At.CALL.value, 0, 0, 0), f"P{human_seat}", "CALL")
+                    if valid[At.CALL.value] and st.button(
+                        "Call", use_container_width=True
+                    ):
+                        _apply_action(
+                            (At.CALL.value, 0, 0, 0), f"P{human_seat}", "CALL"
+                        )
                         st.rerun()
                 with c3:
-                    if valid[At.CHECK.value] and st.button("Check", use_container_width=True):
-                        _apply_action((At.CHECK.value, 0, 0, 0), f"P{human_seat}", "CHECK")
+                    if valid[At.CHECK.value] and st.button(
+                        "Check", use_container_width=True
+                    ):
+                        _apply_action(
+                            (At.CHECK.value, 0, 0, 0), f"P{human_seat}", "CHECK"
+                        )
                         st.rerun()
                 with c4:
-                    raise_to = st.number_input("Raise to", min_value=min_raise, max_value=max_raise, value=min_raise, step=1)
-                    if valid[At.RAISE.value] and st.button("Raise", use_container_width=True):
-                        _apply_action((At.RAISE.value, int(raise_to), 0, 0), f"P{human_seat}", "RAISE")
+                    raise_to = st.number_input(
+                        "Raise to",
+                        min_value=min_raise,
+                        max_value=max_raise,
+                        value=min_raise,
+                        step=1,
+                    )
+                    if valid[At.RAISE.value] and st.button(
+                        "Raise", use_container_width=True
+                    ):
+                        _apply_action(
+                            (At.RAISE.value, int(raise_to), 0, 0),
+                            f"P{human_seat}",
+                            "RAISE",
+                        )
                         st.rerun()
         else:
             # Bot's turn or bot-vs-bot watching controls.
-            both_bots = st.session_state.agent0 is not None and st.session_state.agent1 is not None
+            both_bots = (
+                st.session_state.agent0 is not None
+                and st.session_state.agent1 is not None
+            )
             if both_bots:
                 a, b = st.columns(2)
                 with a:
