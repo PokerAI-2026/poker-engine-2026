@@ -6,7 +6,11 @@ from dataclasses import dataclass
 from itertools import combinations
 from typing import Any, Iterable, Sequence
 
+import numpy as np
+
 from submission.lut_store import KEEP_INDEX_PAIRS, LUTStore, N_CARDS, pack_flop_key
+
+_ALL_CARDS = np.arange(N_CARDS, dtype=np.intp)
 
 
 @dataclass(frozen=True)
@@ -87,8 +91,8 @@ class TimeSupervisor:
     def __init__(
         self,
         total_hands: int = 1000,
-        full_threshold: float = 0.8,
-        survival_threshold: float = 0.20,
+        full_threshold: float = 1.2,
+        survival_threshold: float = 0.30,
     ) -> None:
         self.total_hands = total_hands
         self.full_threshold = full_threshold
@@ -114,12 +118,16 @@ class OpponentModel:
         self.cbet_opportunities = 0
         self.showdown_count = 0
         self.showdown_aggressive_count = 0
+        self.fold_count = 0
+        self.fold_opportunities = 0
 
         self._current_hand = -1
         self._hand_vpip = False
         self._hand_pfr = False
         self._hand_opp_preflop_aggressor = False
         self._hand_cbet = False
+        self._hand_fold = False
+        self._hand_fold_opportunity = False
         self._last_event_token: tuple[int, int, str, int, int] | None = None
         self._finalized_hands: set[int] = set()
 
@@ -131,6 +139,8 @@ class OpponentModel:
         self._hand_pfr = False
         self._hand_opp_preflop_aggressor = False
         self._hand_cbet = False
+        self._hand_fold = False
+        self._hand_fold_opportunity = False
         self._last_event_token = None
 
     def record_state(self, state: ParsedState) -> None:
@@ -151,6 +161,10 @@ class OpponentModel:
             self._hand_opp_preflop_aggressor = True
         if state.street == 1 and self._hand_opp_preflop_aggressor and action == "RAISE":
             self._hand_cbet = True
+        if action == "FOLD":
+            self._hand_fold = True
+        if action in ("FOLD", "CALL", "RAISE"):
+            self._hand_fold_opportunity = True
 
     def finalize_hand(self, state: ParsedState, info: dict[str, Any] | None) -> None:
         hand_number = state.hand_number
@@ -163,6 +177,9 @@ class OpponentModel:
         if self._hand_opp_preflop_aggressor:
             self.cbet_opportunities += 1
             self.cbet_count += int(self._hand_cbet)
+        if self._hand_fold_opportunity:
+            self.fold_opportunities += 1
+            self.fold_count += int(self._hand_fold)
 
         info = info or {}
         if "player_0_cards" in info and "player_1_cards" in info:
@@ -170,8 +187,13 @@ class OpponentModel:
             if self._hand_pfr or self._hand_cbet:
                 self.showdown_aggressive_count += 1
 
+    def get_fold_rate(self) -> float:
+        if self.fold_opportunities < 10:
+            return 0.0
+        return self.fold_count / self.fold_opportunities
+
     def get_margin(self, base_margin: float = 0.05) -> float:
-        if self.hands_observed == 0:
+        if self.hands_observed < 5:
             return base_margin
 
         vpip = self.vpip_count / max(1, self.hands_observed)
@@ -181,20 +203,34 @@ class OpponentModel:
             if self.cbet_opportunities
             else 0.0
         )
+        fold_rate = self.get_fold_rate()
 
         margin = base_margin
+
         if vpip > 0.80 and pfr > 0.45:
-            margin -= 0.02
-        if pfr < 0.20:
+            margin -= 0.03
+        elif vpip > 0.80 and pfr < 0.25:
             margin += 0.03
-        if cbet > 0.70:
-            margin += 0.01
+
+        if pfr < 0.15:
+            margin += 0.04
+        elif pfr < 0.25:
+            margin += 0.02
+
+        if cbet > 0.75:
+            margin += 0.02
+
+        if fold_rate < 0.15 and self.fold_opportunities >= 20:
+            margin += 0.03
+        elif fold_rate > 0.50:
+            margin -= 0.03
+
         return max(0.02, min(0.15, margin))
 
 
 class DiscardEngine:
     def __init__(
-        self, luts: LUTStore, full_samples: int = 375, fast_samples: int = 200
+        self, luts: LUTStore, full_samples: int = 100, fast_samples: int = 40
     ) -> None:
         self.luts = luts
         self.full_samples = full_samples
@@ -205,7 +241,79 @@ class DiscardEngine:
             return self.full_samples
         if mode == "fast":
             return self.fast_samples
-        return max(120, self.fast_samples // 2)
+        return max(32, self.fast_samples // 2)
+
+    @staticmethod
+    def _heuristic_flop_ev(keep_cards: Sequence[int], flop_cards: Sequence[int]) -> float:
+        """
+        Cheap deterministic estimate for fast/survival paths.
+        Ranks: 0-7 = 2-9, 8 = Ace.  Suits: 0-2 (only 3 suits in 27-card deck).
+        """
+        cards = [int(c) for c in keep_cards] + [int(c) for c in flop_cards[:3]]
+        ranks = [c % 9 for c in cards]
+        suits = [c // 9 for c in cards]
+        keep_ranks = [c % 9 for c in (int(keep_cards[0]), int(keep_cards[1]))]
+        keep_suits = [c // 9 for c in (int(keep_cards[0]), int(keep_cards[1]))]
+
+        rank_counts: dict[int, int] = {}
+        for r in ranks:
+            rank_counts[r] = rank_counts.get(r, 0) + 1
+        max_same_rank = max(rank_counts.values()) if rank_counts else 1
+
+        suit_counts: dict[int, int] = {}
+        for s in suits:
+            suit_counts[s] = suit_counts.get(s, 0) + 1
+        max_same_suit = max(suit_counts.values()) if suit_counts else 1
+
+        ev = 0.42
+
+        if max_same_rank >= 3:
+            ev += 0.20
+        elif max_same_rank >= 2:
+            n_pairs = sum(1 for v in rank_counts.values() if v >= 2)
+            if n_pairs >= 2:
+                ev += 0.15
+            else:
+                ev += 0.10
+
+        if max_same_suit >= 5:
+            ev += 0.28
+        elif max_same_suit >= 4:
+            ev += 0.10
+        elif max_same_suit >= 3:
+            if keep_suits[0] == keep_suits[1]:
+                hero_suit = keep_suits[0]
+                if suit_counts.get(hero_suit, 0) >= 3:
+                    ev += 0.05
+
+        rank_set = set(ranks)
+        straight_windows = [
+            (0, 1, 2, 3, 4),
+            (1, 2, 3, 4, 5),
+            (2, 3, 4, 5, 6),
+            (3, 4, 5, 6, 7),
+            (4, 5, 6, 7, 8),
+            (8, 0, 1, 2, 3),
+        ]
+        best_consec = 0
+        for window in straight_windows:
+            match = sum(1 for r in window if r in rank_set)
+            if match > best_consec:
+                best_consec = match
+        if best_consec >= 5:
+            ev += 0.25
+        elif best_consec >= 4:
+            ev += 0.06
+        elif best_consec >= 3:
+            ev += 0.02
+
+        if keep_suits[0] == keep_suits[1]:
+            ev += 0.03
+
+        top_keep = max(keep_ranks)
+        ev += (top_keep / 8.0) * 0.06
+
+        return max(0.15, min(0.90, ev))
 
     def _sample_equity(
         self,
@@ -242,11 +350,10 @@ class DiscardEngine:
             board_known = board_known[:5]
             need_board = 0
 
-        # Exact compare when no future board cards remain and range is moderate.
         if need_board == 0 and len(candidate_range) <= 200:
             wins = ties = 0.0
+            my_score = self.luts.evaluate_7card_score(hero_cards, board_known)
             for opp_cards in candidate_range:
-                my_score = self.luts.evaluate_7card_score(hero_cards, board_known)
                 opp_score = self.luts.evaluate_7card_score(opp_cards, board_known)
                 if my_score < opp_score:
                     wins += 1.0
@@ -254,21 +361,32 @@ class DiscardEngine:
                     ties += 1.0
             return (wins + 0.5 * ties) / len(candidate_range)
 
-        rng = random.Random(seed)
+        rng = np.random.default_rng(seed & 0xFFFFFFFF)
+        base_remaining = np.array(
+            [c for c in range(N_CARDS) if c not in used_hero_board], dtype=np.intp
+        )
+        range_arr = np.array(candidate_range, dtype=np.intp)
+        n_range = len(candidate_range)
+
         wins = 0.0
         ties = 0.0
         valid = 0
         for _ in range(samples):
-            opp_cards = candidate_range[rng.randrange(len(candidate_range))]
-            blocked = used_hero_board | {opp_cards[0], opp_cards[1]}
-            remaining = [c for c in range(N_CARDS) if c not in blocked]
+            idx = rng.integers(n_range)
+            opp_c0 = range_arr[idx, 0]
+            opp_c1 = range_arr[idx, 1]
+            mask = (base_remaining != opp_c0) & (base_remaining != opp_c1)
+            remaining = base_remaining[mask]
             if need_board > len(remaining):
                 continue
-            board_tail = rng.sample(remaining, need_board) if need_board > 0 else []
-            board5 = board_known + board_tail
+            if need_board > 0:
+                board_tail = rng.choice(remaining, size=need_board, replace=False)
+                board5 = board_known + board_tail.tolist()
+            else:
+                board5 = board_known
 
             my_score = self.luts.evaluate_7card_score(hero_cards, board5)
-            opp_score = self.luts.evaluate_7card_score(opp_cards, board5)
+            opp_score = self.luts.evaluate_7card_score((opp_c0, opp_c1), board5)
             if my_score < opp_score:
                 wins += 1.0
             elif my_score == opp_score:
@@ -287,6 +405,10 @@ class DiscardEngine:
         cached = self.luts.get_flop_ev_by_key(key)
         if cached is not None:
             return cached
+        if mode != "full":
+            ev = self._heuristic_flop_ev(keep_cards, flop_cards)
+            self.luts.set_flop_ev_by_key(key, ev)
+            return ev
         discard_samples = min(self._sample_size(mode), 300)
         ev = self._sample_equity(
             hero_cards=keep_cards,
@@ -336,20 +458,15 @@ class DiscardEngine:
         cached = self.luts.get_flop_ev_by_key(key)
         if cached is not None:
             return cached
-        ev = self._sample_equity(
-            hero_cards=keep_cards,
-            known_board=flop_cards,
-            opponent_range=None,
-            samples=80,
-            seed=0xA5A5A5 ^ key,
-        )
+        ev = self._heuristic_flop_ev(keep_cards, flop_cards)
         self.luts.set_flop_ev_by_key(key, ev)
         return ev
 
     def narrowed_opponent_range(
         self, state: ParsedState, mode: str
     ) -> list[tuple[int, int]] | None:
-        if len(state.community_cards) < 3:
+        # Range narrowing is expensive and not worth it on early streets.
+        if mode != "full" or state.street < 2 or len(state.community_cards) < 3:
             return None
         known = (
             set(state.my_cards)
@@ -402,6 +519,8 @@ class DiscardEngine:
 class DecisionEngine:
     def __init__(self, action_types: Any) -> None:
         self.action_types = action_types
+        self._seed = random.randint(0, 0xFFFFFFFF)
+        self._rng = random.Random(self._seed)
 
     def _is_valid(self, state: ParsedState, action_idx: int) -> bool:
         return 0 <= action_idx < len(state.valid_actions) and bool(
@@ -414,22 +533,65 @@ class DecisionEngine:
             return lo
         return max(lo, min(hi, value))
 
+    def _jitter(self) -> float:
+        return self._rng.uniform(-0.03, 0.03)
+
+    @staticmethod
+    def _preflop_tightness(
+        my_bet: int, pot_odds: float, margin: float, is_premium: bool
+    ) -> tuple[float, float]:
+        if is_premium:
+            return (pot_odds + margin, max(0.75, pot_odds + 0.30))
+        if my_bet <= 2:
+            return (pot_odds + margin, max(0.75, pot_odds + 0.30))
+        if my_bet <= 8:
+            return (0.58, 0.78)
+        if my_bet <= 16:
+            return (0.65, 0.82)
+        return (0.72, 0.88)
+
     def _raise_amount(self, state: ParsedState, edge: float, mode: str) -> int:
         if state.max_raise <= 0:
             return 0
-        if mode == "full":
-            factor = 0.50
-        elif mode == "fast":
-            factor = 0.40
+        noise = self._rng.uniform(0.80, 1.25)
+        if state.street == 0:
+            if edge > 0.15:
+                raw = 6
+            elif edge > 0.05:
+                raw = 4
+            else:
+                raw = state.min_raise
+            raw = min(raw, 6)
         else:
-            factor = 0.30
-        if edge > 0.35:
-            factor += 0.15
-        raw = int(round(max(2, state.pot_size) * factor))
+            if edge > 0.30:
+                factor = 0.65
+            elif edge > 0.15:
+                factor = 0.50
+            else:
+                factor = 0.35
+            raw = int(round(max(2, state.pot_size) * factor))
+        raw = int(round(raw * noise))
         return self._clamp(raw, state.min_raise, state.max_raise)
 
+    def _should_bluff(self, opp_fold_rate: float) -> bool:
+        if opp_fold_rate < 0.25:
+            return False
+        if opp_fold_rate > 0.50:
+            base_freq = 0.15
+        elif opp_fold_rate > 0.35:
+            base_freq = 0.10
+        else:
+            base_freq = 0.06
+        return self._rng.random() < base_freq
+
     def decide(
-        self, state: ParsedState, my_ev: float, margin: float, mode: str
+        self,
+        state: ParsedState,
+        my_ev: float,
+        margin: float,
+        mode: str,
+        opp_fold_rate: float = 0.0,
+        is_premium: bool = False,
     ) -> tuple[int, int, int, int]:
         fold = self.action_types.FOLD.value
         raise_action = self.action_types.RAISE.value
@@ -439,12 +601,58 @@ class DecisionEngine:
         continue_cost = state.continue_cost
         pot = max(1, state.pot_size)
         pot_odds = (continue_cost / (pot + continue_cost)) if continue_cost > 0 else 0.0
+        jitter = self._jitter()
 
+        street_margin = margin
+        if state.street >= 3:
+            street_margin = max(margin, 0.12)
+        elif state.street >= 2:
+            street_margin = max(margin, 0.08)
+
+        # --- No continue cost: check or bet ---
         if continue_cost == 0:
-            if my_ev > 0.65 and self._is_valid(state, raise_action):
+            if state.street >= 1:
+                value_threshold = 0.58 if opp_fold_rate >= 0.25 else 0.63
+            else:
+                value_threshold = 0.65 if opp_fold_rate >= 0.25 else 0.70
+            value_threshold += jitter
+
+            if my_ev > value_threshold and self._is_valid(state, raise_action):
+                if self._rng.random() < 0.12 and self._is_valid(state, check):
+                    return (check, 0, 0, 0)
                 return (
                     raise_action,
                     self._raise_amount(state, my_ev - 0.5, mode),
+                    0,
+                    0,
+                )
+            if (
+                0.45 <= my_ev <= 0.65
+                and self._is_valid(state, raise_action)
+                and self._rng.random() < 0.08
+            ):
+                return (
+                    raise_action,
+                    self._clamp(
+                        int(round(pot * 0.40)),
+                        state.min_raise,
+                        state.max_raise,
+                    ),
+                    0,
+                    0,
+                )
+            if (
+                my_ev > 0.35
+                and self._is_valid(state, raise_action)
+                and self._should_bluff(opp_fold_rate)
+            ):
+                return (
+                    raise_action,
+                    self._clamp(
+                        int(round(pot * 0.40)),
+                        state.min_raise,
+                        state.max_raise,
+                    ),
                     0,
                     0,
                 )
@@ -461,13 +669,40 @@ class DecisionEngine:
                 )
             return (fold, 0, 0, 0)
 
-        bet_ratio = min(2.0, continue_cost / pot)
-        discount = max(0.65, 1.0 - 0.25 * bet_ratio)
-        effective_ev = my_ev * discount
+        # --- Facing a bet: preflop escalation tiers ---
+        if state.street == 0:
+            call_thresh, raise_thresh = self._preflop_tightness(
+                state.my_bet, pot_odds, street_margin, is_premium
+            )
+            call_thresh += jitter
+            raise_thresh += jitter
 
-        if my_ev > 0.80 and self._is_valid(state, raise_action):
+            if state.my_bet >= 20 and not is_premium:
+                if my_ev >= call_thresh and self._is_valid(state, call):
+                    return (call, 0, 0, 0)
+                if self._is_valid(state, fold):
+                    return (fold, 0, 0, 0)
+                if self._is_valid(state, check):
+                    return (check, 0, 0, 0)
+                return (call if self._is_valid(state, call) else fold, 0, 0, 0)
+
+            if my_ev > raise_thresh and self._is_valid(state, raise_action):
+                return (raise_action, self._raise_amount(state, my_ev - 0.5, mode), 0, 0)
+            if my_ev >= call_thresh and self._is_valid(state, call):
+                return (call, 0, 0, 0)
+            if self._is_valid(state, fold):
+                return (fold, 0, 0, 0)
+            if self._is_valid(state, check):
+                return (check, 0, 0, 0)
+            return (call if self._is_valid(state, call) else fold, 0, 0, 0)
+
+        # --- Facing a bet: post-flop ---
+        raise_threshold = max(0.75, pot_odds + 0.30) + jitter
+        call_threshold = pot_odds + street_margin + jitter
+
+        if my_ev > raise_threshold and self._is_valid(state, raise_action):
             return (raise_action, self._raise_amount(state, my_ev - 0.5, mode), 0, 0)
-        if effective_ev >= (pot_odds + margin) and self._is_valid(state, call):
+        if my_ev >= call_threshold and self._is_valid(state, call):
             return (call, 0, 0, 0)
         if self._is_valid(state, fold):
             return (fold, 0, 0, 0)

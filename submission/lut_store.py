@@ -18,6 +18,7 @@ for n in range(N_CARDS + 1):
         _NCK[n, k] = _NCK[n - 1, k - 1] + _NCK[n - 1, k]
 
 SEVEN_TO_FIVE_SUBSETS = tuple(combinations(range(7), 5))
+_SEVEN_TO_FIVE_NP = np.array(SEVEN_TO_FIVE_SUBSETS, dtype=np.intp)  # (21, 5)
 KEEP_INDEX_PAIRS = tuple(combinations(range(5), 2))
 
 
@@ -101,13 +102,18 @@ class LUTStore:
         return int(self.hand5_strength[combo_to_index(cards5)])
 
     def evaluate_7card_score(self, hole2: Sequence[int], board5: Sequence[int]) -> int:
-        cards7 = [int(hole2[0]), int(hole2[1])] + [int(c) for c in board5]
-        best = 10**9
-        for subset in SEVEN_TO_FIVE_SUBSETS:
-            score = self.hand5_score([cards7[i] for i in subset])
-            if score < best:
-                best = score
-        return best
+        cards7 = np.array(
+            [int(hole2[0]), int(hole2[1]),
+             int(board5[0]), int(board5[1]), int(board5[2]),
+             int(board5[3]), int(board5[4])],
+            dtype=np.intp,
+        )
+        all_hands = cards7[_SEVEN_TO_FIVE_NP]          # (21, 5)
+        all_hands.sort(axis=1)
+        indices = np.zeros(21, dtype=np.int64)
+        for k in range(5):
+            indices += _NCK[all_hands[:, k], k + 1]
+        return int(self.hand5_strength[indices].min())
 
     def get_preflop_equity(self, cards5: Sequence[int]) -> float:
         if len(cards5) < 5:

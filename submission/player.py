@@ -25,7 +25,9 @@ class PlayerAgent(Agent):
         data_dir = Path(__file__).resolve().parent / "data"
         self.luts = LUTStore(data_dir)
         self.state_manager = StateManager()
-        self.time_supervisor = TimeSupervisor(total_hands=1000)
+        self.time_supervisor = TimeSupervisor(
+            total_hands=1000, full_threshold=0.90, survival_threshold=0.35
+        )
         self.opponent_model = OpponentModel()
         self.discard_engine = DiscardEngine(self.luts)
         self.decision_engine = DecisionEngine(self.action_types)
@@ -109,6 +111,26 @@ class PlayerAgent(Agent):
                     and state.continue_cost == 0
                 ):
                     return (call, 0, 0, 0)
+        elif len(state.my_cards) >= 2 and len(state.community_cards) >= 3:
+            heuristic_ev = DiscardEngine._heuristic_flop_ev(
+                state.my_cards[:2], state.community_cards[:3]
+            )
+            pot = max(1, state.pot_size)
+            continue_cost = state.continue_cost
+            pot_odds = (
+                continue_cost / (pot + continue_cost) if continue_cost > 0 else 0.0
+            )
+            if continue_cost == 0:
+                if self._is_valid(state.valid_actions, check):
+                    return (check, 0, 0, 0)
+            elif heuristic_ev >= pot_odds + 0.05:
+                if self._is_valid(state.valid_actions, call):
+                    return (call, 0, 0, 0)
+            else:
+                if self._is_valid(state.valid_actions, fold):
+                    return (fold, 0, 0, 0)
+                if self._is_valid(state.valid_actions, check):
+                    return (check, 0, 0, 0)
         else:
             if self._is_valid(state.valid_actions, check):
                 return (check, 0, 0, 0)
@@ -159,13 +181,15 @@ class PlayerAgent(Agent):
                 )
 
             opponent_range = None
-            if mode == "full":
+            if mode == "full" and state.street >= 2:
                 opponent_range = self.discard_engine.narrowed_opponent_range(
                     state, mode
                 )
 
+            is_premium = False
             if state.street == 0 and len(state.my_cards) >= 5:
                 my_ev = self.luts.get_preflop_equity(state.my_cards[:5])
+                is_premium = self.luts.is_premium_preflop(state.my_cards[:5])
             elif len(state.my_cards) >= 2:
                 my_ev = self.discard_engine.estimate_hero_equity(
                     hero_cards=state.my_cards[:2],
@@ -178,7 +202,12 @@ class PlayerAgent(Agent):
                 my_ev = 0.5
 
             margin = self.opponent_model.get_margin(self.base_margin)
-            action = self.decision_engine.decide(state, my_ev, margin, mode)
+            opp_fold_rate = self.opponent_model.get_fold_rate()
+            action = self.decision_engine.decide(
+                state, my_ev, margin, mode,
+                opp_fold_rate=opp_fold_rate,
+                is_premium=is_premium,
+            )
             self.logger.debug(
                 "Hand %s street=%s mode=%s tavg=%.3f ev=%.3f margin=%.3f action=%s",
                 state.hand_number,

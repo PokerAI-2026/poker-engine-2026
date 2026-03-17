@@ -81,12 +81,12 @@ def build_preflop_equity_from_pairs(pair_equity: np.ndarray) -> np.ndarray:
     preflop = np.zeros(HAND5_SIZE, dtype=np.float32)
     for hand5 in combinations(range(N_CARDS), 5):
         idx5 = combo_to_index(hand5)
-        total = 0.0
-        count = 0
+        best = 0.0
         for a, b in combinations(hand5, 2):
-            total += float(pair_equity[pair_to_index(a, b)])
-            count += 1
-        preflop[idx5] = total / count
+            eq = float(pair_equity[pair_to_index(a, b)])
+            if eq > best:
+                best = eq
+        preflop[idx5] = best
     return preflop
 
 
