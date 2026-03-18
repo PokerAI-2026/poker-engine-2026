@@ -241,6 +241,7 @@ class DiscardEngine:
         self.full_samples = full_samples
         self.fast_samples = fast_samples
         self.flop_table = flop_table
+        self._heuristic_cache: dict[int, float] = {}
 
     def _sample_size(self, mode: str, tavg: float | None = None) -> int:
         if mode == "full":
@@ -429,13 +430,16 @@ class DiscardEngine:
         tavg: float | None = None,
     ) -> float:
         key = pack_flop_key(keep_cards, flop_cards)
+        if mode != "full":
+            cached = self._heuristic_cache.get(key)
+            if cached is not None:
+                return cached
+            ev = self._heuristic_flop_ev(keep_cards, flop_cards)
+            self._heuristic_cache[key] = ev
+            return ev
         cached = self.luts.get_flop_ev_by_key(key)
         if cached is not None:
             return cached
-        if mode != "full":
-            ev = self._heuristic_flop_ev(keep_cards, flop_cards)
-            self.luts.set_flop_ev_by_key(key, ev)
-            return ev
         discard_samples = min(self._sample_size(mode, tavg=tavg), 700)
         ev = self._sample_equity(
             hero_cards=keep_cards,
@@ -490,11 +494,11 @@ class DiscardEngine:
         self, keep_cards: Sequence[int], flop_cards: Sequence[int]
     ) -> float:
         key = pack_flop_key(keep_cards, flop_cards)
-        cached = self.luts.get_flop_ev_by_key(key)
+        cached = self._heuristic_cache.get(key)
         if cached is not None:
             return cached
         ev = self._heuristic_flop_ev(keep_cards, flop_cards)
-        self.luts.set_flop_ev_by_key(key, ev)
+        self._heuristic_cache[key] = ev
         return ev
 
     def narrowed_opponent_range(
@@ -570,7 +574,7 @@ class DecisionEngine:
         return max(lo, min(hi, value))
 
     def _jitter(self) -> float:
-        return self._rng.uniform(-0.03, 0.03)
+        return self._rng.uniform(-0.015, 0.015)
 
     @staticmethod
     def _preflop_tightness(
@@ -579,45 +583,44 @@ class DecisionEngine:
         if is_premium:
             return (pot_odds + margin, max(0.75, pot_odds + 0.30))
         if my_bet <= 2:
-            return (pot_odds + margin, max(0.75, pot_odds + 0.30))
+            return (pot_odds + margin + 0.02, max(0.78, pot_odds + 0.33))
         if my_bet <= 8:
-            return (0.58, 0.78)
+            return (0.61, 0.80)
         if my_bet <= 16:
-            return (0.65, 0.82)
-        return (0.72, 0.88)
+            return (0.68, 0.85)
+        return (0.76, 0.90)
 
     def _raise_amount(self, state: ParsedState, edge: float, mode: str) -> int:
         if state.max_raise <= 0:
             return 0
         noise = self._rng.uniform(0.80, 1.25)
         if state.street == 0:
-            if edge > 0.15:
-                raw = 6
-            elif edge > 0.05:
-                raw = 4
+            if edge > 0.18:
+                raw = max(8, state.min_raise)
+            elif edge > 0.08:
+                raw = max(5, state.min_raise)
             else:
                 raw = state.min_raise
-            raw = min(raw, 6)
         else:
             if edge > 0.30:
-                factor = 0.65
-            elif edge > 0.15:
-                factor = 0.50
+                factor = 0.95
+            elif edge > 0.18:
+                factor = 0.75
             else:
-                factor = 0.35
+                factor = 0.55
             raw = int(round(max(2, state.pot_size) * factor))
         raw = int(round(raw * noise))
         return self._clamp(raw, state.min_raise, state.max_raise)
 
     def _should_bluff(self, opp_fold_rate: float) -> bool:
-        if opp_fold_rate < 0.25:
+        if opp_fold_rate < 0.58:
             return False
-        if opp_fold_rate > 0.50:
-            base_freq = 0.15
-        elif opp_fold_rate > 0.35:
-            base_freq = 0.10
+        if opp_fold_rate > 0.70:
+            base_freq = 0.035
+        elif opp_fold_rate > 0.64:
+            base_freq = 0.02
         else:
-            base_freq = 0.06
+            base_freq = 0.012
         return self._rng.random() < base_freq
 
     def decide(
@@ -648,9 +651,9 @@ class DecisionEngine:
         # --- No continue cost: check or bet ---
         if continue_cost == 0:
             if state.street >= 1:
-                value_threshold = 0.58 if opp_fold_rate >= 0.25 else 0.63
+                value_threshold = 0.60 if opp_fold_rate >= 0.40 else 0.64
             else:
-                value_threshold = 0.65 if opp_fold_rate >= 0.25 else 0.70
+                value_threshold = 0.68 if opp_fold_rate >= 0.40 else 0.71
             value_threshold += jitter
 
             if my_ev > value_threshold and self._is_valid(state, raise_action):
@@ -663,22 +666,8 @@ class DecisionEngine:
                     0,
                 )
             if (
-                0.45 <= my_ev <= 0.65
-                and self._is_valid(state, raise_action)
-                and self._rng.random() < 0.08
-            ):
-                return (
-                    raise_action,
-                    self._clamp(
-                        int(round(pot * 0.40)),
-                        state.min_raise,
-                        state.max_raise,
-                    ),
-                    0,
-                    0,
-                )
-            if (
-                my_ev > 0.35
+                state.street <= 2
+                and my_ev > 0.46
                 and self._is_valid(state, raise_action)
                 and self._should_bluff(opp_fold_rate)
             ):
@@ -733,7 +722,7 @@ class DecisionEngine:
             return (call if self._is_valid(state, call) else fold, 0, 0, 0)
 
         # --- Facing a bet: post-flop ---
-        raise_threshold = max(0.75, pot_odds + 0.30) + jitter
+        raise_threshold = max(0.82, pot_odds + 0.35) + jitter
         call_threshold = pot_odds + street_margin + jitter
 
         if my_ev > raise_threshold and self._is_valid(state, raise_action):
