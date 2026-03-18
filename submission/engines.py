@@ -207,6 +207,67 @@ class DiscardEngine:
             return self.fast_samples
         return max(120, self.fast_samples // 2)
 
+    @staticmethod
+    def _card_rank(card: int) -> int:
+        return int(card) % 9
+
+    @staticmethod
+    def _card_suit(card: int) -> int:
+        return int(card) // 9
+
+    @classmethod
+    def _is_high_pair(cls, keep_cards: Sequence[int]) -> bool:
+        if len(keep_cards) != 2:
+            return False
+        r0 = cls._card_rank(int(keep_cards[0]))
+        r1 = cls._card_rank(int(keep_cards[1]))
+        return r0 == r1 and r0 >= 6  # 8, 9, A in this deck encoding
+
+    @classmethod
+    def _made_two_pair_or_better(
+        cls, keep_cards: Sequence[int], flop_cards: Sequence[int]
+    ) -> bool:
+        cards = [int(c) for c in keep_cards] + [int(c) for c in flop_cards[:3]]
+        if len(cards) < 5:
+            return False
+        rank_counts: dict[int, int] = {}
+        for card in cards:
+            rank = cls._card_rank(card)
+            rank_counts[rank] = rank_counts.get(rank, 0) + 1
+        if any(count >= 3 for count in rank_counts.values()):
+            return True
+        pair_count = sum(1 for count in rank_counts.values() if count >= 2)
+        return pair_count >= 2
+
+    @classmethod
+    def _made_straight_or_flush(
+        cls, keep_cards: Sequence[int], flop_cards: Sequence[int]
+    ) -> bool:
+        cards = [int(c) for c in keep_cards] + [int(c) for c in flop_cards[:3]]
+        if len(cards) < 5:
+            return False
+
+        suit_counts: dict[int, int] = {}
+        for card in cards:
+            suit = cls._card_suit(card)
+            suit_counts[suit] = suit_counts.get(suit, 0) + 1
+        if any(count >= 5 for count in suit_counts.values()):
+            return True
+
+        rank_values = set()
+        for card in cards:
+            rank = cls._card_rank(card)
+            if rank == 8:  # Ace
+                rank_values.add(14)
+            else:
+                rank_values.add(rank + 2)
+        if 14 in rank_values:
+            rank_values.add(1)
+        for start in range(1, 11):
+            if all((start + offset) in rank_values for offset in range(5)):
+                return True
+        return False
+
     def _sample_equity(
         self,
         hero_cards: Sequence[int],
@@ -308,12 +369,46 @@ class DiscardEngine:
         flop = state.community_cards[:3]
         best_pair = (0, 1)
         best_ev = -1.0
+        best_adjusted_ev = -1.0
+        best_is_high_pair = False
+        best_has_made_sf = False
+
+        best_high_pair: tuple[int, int] | None = None
+        best_high_pair_ev = -1.0
+        best_high_pair_adjusted_ev = -1.0
         for i, j in KEEP_INDEX_PAIRS:
             keep_cards = (cards[i], cards[j])
             ev = self.get_or_estimate_flop_ev(keep_cards, flop, mode)
-            if ev > best_ev:
+            is_high_pair = self._is_high_pair(keep_cards)
+            has_made_value = self._made_two_pair_or_better(keep_cards, flop)
+            has_made_sf = self._made_straight_or_flush(keep_cards, flop)
+
+            adjusted_ev = ev
+            if is_high_pair:
+                adjusted_ev *= 1.15
+            if has_made_value:
+                adjusted_ev *= 1.10
+
+            if adjusted_ev > best_adjusted_ev:
+                best_adjusted_ev = adjusted_ev
                 best_ev = ev
                 best_pair = (i, j)
+                best_is_high_pair = is_high_pair
+                best_has_made_sf = has_made_sf
+
+            if is_high_pair and adjusted_ev > best_high_pair_adjusted_ev:
+                best_high_pair_adjusted_ev = adjusted_ev
+                best_high_pair_ev = ev
+                best_high_pair = (i, j)
+
+        # Keep strong made pre-flop pairs unless the alternative is an immediate made straight/flush.
+        if (
+            best_high_pair is not None
+            and not best_is_high_pair
+            and not best_has_made_sf
+        ):
+            best_pair = best_high_pair
+            best_ev = best_high_pair_ev
         return (4, 0, best_pair[0], best_pair[1]), best_ev
 
     def opponent_lower_bound(
@@ -367,15 +462,39 @@ class DiscardEngine:
         lower_bound = self.opponent_lower_bound(
             state.opp_discarded_cards, state.community_cards[:3], mode
         )
-        if lower_bound is None:
-            return candidates
-
-        filtered: list[tuple[int, int]] = []
         flop = state.community_cards[:3]
-        for combo in candidates:
-            if self._quick_flop_ev(combo, flop) >= lower_bound:
-                filtered.append(combo)
-        return filtered if filtered else candidates
+        combo_scores: dict[tuple[int, int], float] = {}
+        if lower_bound is None:
+            narrowed = candidates
+        else:
+            filtered: list[tuple[int, int]] = []
+            for combo in candidates:
+                score = self._quick_flop_ev(combo, flop)
+                combo_scores[combo] = score
+                if score >= lower_bound:
+                    filtered.append(combo)
+            narrowed = filtered if filtered else candidates
+
+        # Action-aware pressure trim: remove the weakest tail under large overbets.
+        pressure_ratio = state.opp_bet / max(1, state.pot_size)
+        if pressure_ratio > 1.0 and len(narrowed) > 12:
+            trim_fraction = 0.50 if pressure_ratio >= 1.5 else 0.45
+            scored = [
+                (
+                    combo,
+                    combo_scores.get(
+                        combo, self._quick_flop_ev(combo, flop)
+                    ),
+                )
+                for combo in narrowed
+            ]
+            scored.sort(key=lambda item: item[1], reverse=True)
+            keep_count = max(12, int(len(scored) * (1.0 - trim_fraction)))
+            pressure_narrowed = [combo for combo, _ in scored[:keep_count]]
+            if pressure_narrowed:
+                return pressure_narrowed
+
+        return narrowed
 
     def estimate_hero_equity(
         self,
@@ -461,8 +580,8 @@ class DecisionEngine:
                 )
             return (fold, 0, 0, 0)
 
-        bet_ratio = min(2.0, continue_cost / pot)
-        discount = max(0.65, 1.0 - 0.25 * bet_ratio)
+        bet_ratio = continue_cost / pot
+        discount = max(0.20, 1.0 - 0.35 * bet_ratio)
         effective_ev = my_ev * discount
 
         if my_ev > 0.80 and self._is_valid(state, raise_action):

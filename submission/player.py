@@ -116,6 +116,25 @@ class PlayerAgent(Agent):
                 return (fold, 0, 0, 0)
         return self._safe_action(state.valid_actions)
 
+    def _preflop_aggression_action(self, state) -> Tuple[int, int, int, int] | None:
+        if state.street != 0 or len(state.my_cards) < 5:
+            return None
+        if not self.luts.is_aggressive_preflop(state.my_cards[:5]):
+            return None
+
+        raise_action = self.action_types.RAISE.value
+        call = self.action_types.CALL.value
+        check = self.action_types.CHECK.value
+
+        if self._is_valid(state.valid_actions, raise_action):
+            target = max(state.min_raise, min(state.max_raise, max(2, state.min_raise)))
+            return (raise_action, target, 0, 0)
+        if state.continue_cost > 0 and self._is_valid(state.valid_actions, call):
+            return (call, 0, 0, 0)
+        if self._is_valid(state.valid_actions, check):
+            return (check, 0, 0, 0)
+        return None
+
     def act(
         self,
         observation: Observation,
@@ -148,6 +167,21 @@ class PlayerAgent(Agent):
                 )
                 return self._validated_action(
                     action, state.valid_actions, state.min_raise, state.max_raise
+                )
+
+            preflop_action = self._preflop_aggression_action(state)
+            if preflop_action is not None:
+                self.logger.debug(
+                    "Hand %s street=0 forced preflop aggression mode=%s action=%s",
+                    state.hand_number,
+                    mode,
+                    preflop_action,
+                )
+                return self._validated_action(
+                    preflop_action,
+                    state.valid_actions,
+                    state.min_raise,
+                    state.max_raise,
                 )
 
             if mode == "survival":

@@ -78,15 +78,19 @@ def generate_pair_equity(hand5_strength: np.ndarray, samples_per_pair: int, seed
 
 
 def build_preflop_equity_from_pairs(pair_equity: np.ndarray) -> np.ndarray:
+    return build_preflop_equity_from_pairs_topk(pair_equity, top_k=1)
+
+
+def build_preflop_equity_from_pairs_topk(pair_equity: np.ndarray, top_k: int) -> np.ndarray:
+    effective_top_k = max(1, min(10, int(top_k)))
     preflop = np.zeros(HAND5_SIZE, dtype=np.float32)
     for hand5 in combinations(range(N_CARDS), 5):
         idx5 = combo_to_index(hand5)
-        total = 0.0
-        count = 0
+        pair_values: list[float] = []
         for a, b in combinations(hand5, 2):
-            total += float(pair_equity[pair_to_index(a, b)])
-            count += 1
-        preflop[idx5] = total / count
+            pair_values.append(float(pair_equity[pair_to_index(a, b)]))
+        pair_values.sort(reverse=True)
+        preflop[idx5] = float(sum(pair_values[:effective_top_k]) / effective_top_k)
     return preflop
 
 
@@ -141,6 +145,12 @@ def main() -> None:
     parser.add_argument("--flop-seed-states", type=int, default=3000, help="Number of seeded flop states")
     parser.add_argument("--flop-samples", type=int, default=260, help="Samples per seeded flop state")
     parser.add_argument("--seed", type=int, default=2026, help="Deterministic RNG seed")
+    parser.add_argument(
+        "--preflop-top-k",
+        type=int,
+        default=1,
+        help="Aggregate each 5-card preflop hand using the top-k pair equities (1..10).",
+    )
     parser.add_argument("--overwrite", action="store_true", help="Overwrite existing files")
     args = parser.parse_args()
 
@@ -163,7 +173,9 @@ def main() -> None:
     print("Generating preflop pair equities...")
     pair_equity = generate_pair_equity(hand5_strength, samples_per_pair=args.pair_samples, seed=args.seed)
     print("Generating preflop 5-card equities...")
-    preflop_equity = build_preflop_equity_from_pairs(pair_equity)
+    preflop_equity = build_preflop_equity_from_pairs_topk(
+        pair_equity, top_k=args.preflop_top_k
+    )
     np.save(preflop_path, preflop_equity)
     print(f"Saved: {preflop_path}")
 
