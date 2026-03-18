@@ -8,6 +8,7 @@ from typing import Any, Iterable, Sequence
 
 import numpy as np
 
+from submission.flop_table import FlopDiscardTable
 from submission.lut_store import KEEP_INDEX_PAIRS, LUTStore, N_CARDS, pack_flop_key
 
 _ALL_CARDS = np.arange(N_CARDS, dtype=np.intp)
@@ -230,18 +231,43 @@ class OpponentModel:
 
 class DiscardEngine:
     def __init__(
-        self, luts: LUTStore, full_samples: int = 100, fast_samples: int = 40
+        self,
+        luts: LUTStore,
+        full_samples: int = 450,
+        fast_samples: int = 160,
+        flop_table: FlopDiscardTable | None = None,
     ) -> None:
         self.luts = luts
         self.full_samples = full_samples
         self.fast_samples = fast_samples
+        self.flop_table = flop_table
 
-    def _sample_size(self, mode: str) -> int:
+    def _sample_size(self, mode: str, tavg: float | None = None) -> int:
         if mode == "full":
-            return self.full_samples
-        if mode == "fast":
-            return self.fast_samples
-        return max(32, self.fast_samples // 2)
+            base = self.full_samples
+        elif mode == "fast":
+            base = self.fast_samples
+        else:
+            base = max(48, self.fast_samples // 2)
+
+        # Spend more compute while we have surplus clock.
+        if tavg is not None:
+            if mode == "full":
+                if tavg >= 1.6:
+                    base = int(base * 2.4)
+                elif tavg >= 1.2:
+                    base = int(base * 2.0)
+                elif tavg >= 0.9:
+                    base = int(base * 1.5)
+                elif tavg >= 0.7:
+                    base = int(base * 1.2)
+            elif mode == "fast":
+                if tavg >= 0.9:
+                    base = int(base * 1.35)
+                elif tavg >= 0.7:
+                    base = int(base * 1.15)
+
+        return max(32, min(2600, int(base)))
 
     @staticmethod
     def _heuristic_flop_ev(keep_cards: Sequence[int], flop_cards: Sequence[int]) -> float:
@@ -400,6 +426,7 @@ class DiscardEngine:
         keep_cards: Sequence[int],
         flop_cards: Sequence[int],
         mode: str,
+        tavg: float | None = None,
     ) -> float:
         key = pack_flop_key(keep_cards, flop_cards)
         cached = self.luts.get_flop_ev_by_key(key)
@@ -409,7 +436,7 @@ class DiscardEngine:
             ev = self._heuristic_flop_ev(keep_cards, flop_cards)
             self.luts.set_flop_ev_by_key(key, ev)
             return ev
-        discard_samples = min(self._sample_size(mode), 300)
+        discard_samples = min(self._sample_size(mode, tavg=tavg), 700)
         ev = self._sample_equity(
             hero_cards=keep_cards,
             known_board=flop_cards,
@@ -421,18 +448,26 @@ class DiscardEngine:
         return ev
 
     def choose_discard(
-        self, state: ParsedState, mode: str
+        self, state: ParsedState, mode: str, tavg: float | None = None
     ) -> tuple[tuple[int, int, int, int], float]:
         cards = state.my_cards
         if len(cards) != 5 or len(state.community_cards) < 3:
             return (4, 0, 0, 1), 0.5
 
         flop = state.community_cards[:3]
+        # In full mode we intentionally re-evaluate discards online to spend
+        # available compute budget and adapt to the current pacing.
+        if self.flop_table is not None and mode != "full":
+            table_choice = self.flop_table.choose_keep_positions(cards, flop)
+            if table_choice is not None:
+                keep_a, keep_b, best_ev = table_choice
+                return (4, 0, keep_a, keep_b), best_ev
+
         best_pair = (0, 1)
         best_ev = -1.0
         for i, j in KEEP_INDEX_PAIRS:
             keep_cards = (cards[i], cards[j])
-            ev = self.get_or_estimate_flop_ev(keep_cards, flop, mode)
+            ev = self.get_or_estimate_flop_ev(keep_cards, flop, mode, tavg=tavg)
             if ev > best_ev:
                 best_ev = ev
                 best_pair = (i, j)
@@ -501,6 +536,7 @@ class DiscardEngine:
         mode: str,
         opponent_range: list[tuple[int, int]] | None = None,
         dead_cards: Sequence[int] = (),
+        tavg: float | None = None,
     ) -> float:
         board = list(board_cards[:5])
         seed = 0x5AA55A ^ pack_flop_key(
@@ -510,7 +546,7 @@ class DiscardEngine:
             hero_cards=hero_cards,
             known_board=board,
             opponent_range=opponent_range,
-            samples=self._sample_size(mode),
+            samples=self._sample_size(mode, tavg=tavg),
             seed=seed,
             dead_cards=dead_cards,
         )

@@ -13,6 +13,7 @@ from submission.engines import (
     StateManager,
     TimeSupervisor,
 )
+from submission.flop_table import FlopDiscardTable
 from submission.lut_store import LUTStore
 
 
@@ -24,12 +25,13 @@ class PlayerAgent(Agent):
 
         data_dir = Path(__file__).resolve().parent / "data"
         self.luts = LUTStore(data_dir)
+        self.flop_table = FlopDiscardTable.from_data_dir(data_dir, strict=False)
         self.state_manager = StateManager()
         self.time_supervisor = TimeSupervisor(
             total_hands=1000, full_threshold=0.90, survival_threshold=0.35
         )
         self.opponent_model = OpponentModel()
-        self.discard_engine = DiscardEngine(self.luts)
+        self.discard_engine = DiscardEngine(self.luts, flop_table=self.flop_table)
         self.decision_engine = DecisionEngine(self.action_types)
 
         player_id = os.getenv("PLAYER_ID", "0")
@@ -158,7 +160,7 @@ class PlayerAgent(Agent):
             if state.can_discard:
                 discard_mode = "survival" if mode == "survival" else mode
                 action, discard_ev = self.discard_engine.choose_discard(
-                    state, discard_mode
+                    state, discard_mode, tavg=tavg
                 )
                 self.logger.debug(
                     "Hand %s discard mode=%s tavg=%.3f ev=%.3f action=%s",
@@ -197,6 +199,7 @@ class PlayerAgent(Agent):
                     mode=mode,
                     opponent_range=opponent_range,
                     dead_cards=state.opp_discarded_cards,
+                    tavg=tavg,
                 )
             else:
                 my_ev = 0.5

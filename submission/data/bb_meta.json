@@ -1,0 +1,57 @@
+{
+  "version": 1,
+  "format": "bb-discard-table-v1",
+  "record_size_bytes": 6,
+  "endianness": "little",
+  "target_states": 500000,
+  "generated_states": 500000,
+  "samples_per_keep": 80,
+  "seed": 2026,
+  "keep_choices": [
+    [
+      0,
+      1
+    ],
+    [
+      0,
+      2
+    ],
+    [
+      0,
+      3
+    ],
+    [
+      0,
+      4
+    ],
+    [
+      1,
+      2
+    ],
+    [
+      1,
+      3
+    ],
+    [
+      1,
+      4
+    ],
+    [
+      2,
+      3
+    ],
+    [
+      2,
+      4
+    ],
+    [
+      3,
+      4
+    ]
+  ],
+  "card_encoding": {
+    "rank": "card % 9",
+    "suit": "card // 9"
+  },
+  "canonicalization": "best lexicographic state over all 6 global suit permutations"
+}
