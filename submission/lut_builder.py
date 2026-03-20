@@ -32,7 +32,9 @@ except ImportError:
     )
 
 
-def evaluate_7_from_lut(hand5_strength: np.ndarray, hole2: tuple[int, int], board5: list[int]) -> int:
+def evaluate_7_from_lut(
+    hand5_strength: np.ndarray, hole2: tuple[int, int], board5: list[int]
+) -> int:
     cards7 = [hole2[0], hole2[1], *board5]
     best = 10**9
     for subset in SEVEN_TO_FIVE_SUBSETS:
@@ -54,7 +56,9 @@ def generate_hand5_strength() -> np.ndarray:
     return arr
 
 
-def generate_pair_equity(hand5_strength: np.ndarray, samples_per_pair: int, seed: int) -> np.ndarray:
+def generate_pair_equity(
+    hand5_strength: np.ndarray, samples_per_pair: int, seed: int
+) -> np.ndarray:
     rng = random.Random(seed)
     pair_equity = np.zeros(PAIR_SIZE, dtype=np.float32)
 
@@ -78,15 +82,21 @@ def generate_pair_equity(hand5_strength: np.ndarray, samples_per_pair: int, seed
 
 
 def build_preflop_equity_from_pairs(pair_equity: np.ndarray) -> np.ndarray:
+    return build_preflop_equity_from_pairs_topk(pair_equity, top_k=1)
+
+
+def build_preflop_equity_from_pairs_topk(
+    pair_equity: np.ndarray, top_k: int
+) -> np.ndarray:
+    effective_top_k = max(1, min(10, int(top_k)))
     preflop = np.zeros(HAND5_SIZE, dtype=np.float32)
     for hand5 in combinations(range(N_CARDS), 5):
         idx5 = combo_to_index(hand5)
-        best = 0.0
+        pair_values: list[float] = []
         for a, b in combinations(hand5, 2):
-            eq = float(pair_equity[pair_to_index(a, b)])
-            if eq > best:
-                best = eq
-        preflop[idx5] = best
+            pair_values.append(float(pair_equity[pair_to_index(a, b)]))
+        pair_values.sort(reverse=True)
+        preflop[idx5] = float(sum(pair_values[:effective_top_k]) / effective_top_k)
     return preflop
 
 
@@ -135,13 +145,34 @@ def generate_flop_seed_table(
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Generate offline LUT artifacts for submission bot.")
-    parser.add_argument("--output-dir", default="submission/data", help="Directory for .npy artifacts")
-    parser.add_argument("--pair-samples", type=int, default=500, help="Samples per preflop pair equity")
-    parser.add_argument("--flop-seed-states", type=int, default=3000, help="Number of seeded flop states")
-    parser.add_argument("--flop-samples", type=int, default=260, help="Samples per seeded flop state")
+    parser = argparse.ArgumentParser(
+        description="Generate offline LUT artifacts for submission bot."
+    )
+    parser.add_argument(
+        "--output-dir", default="submission/data", help="Directory for .npy artifacts"
+    )
+    parser.add_argument(
+        "--pair-samples", type=int, default=500, help="Samples per preflop pair equity"
+    )
+    parser.add_argument(
+        "--flop-seed-states",
+        type=int,
+        default=3000,
+        help="Number of seeded flop states",
+    )
+    parser.add_argument(
+        "--flop-samples", type=int, default=260, help="Samples per seeded flop state"
+    )
     parser.add_argument("--seed", type=int, default=2026, help="Deterministic RNG seed")
-    parser.add_argument("--overwrite", action="store_true", help="Overwrite existing files")
+    parser.add_argument(
+        "--preflop-top-k",
+        type=int,
+        default=1,
+        help="Aggregate each 5-card preflop hand using the top-k pair equities (1..10).",
+    )
+    parser.add_argument(
+        "--overwrite", action="store_true", help="Overwrite existing files"
+    )
     args = parser.parse_args()
 
     out_dir = Path(args.output_dir)
@@ -150,7 +181,12 @@ def main() -> None:
     hand5_path = out_dir / "hand5_strength.npy"
     preflop_path = out_dir / "preflop_equity.npy"
     flop_path = out_dir / "flop_seed_table.npy"
-    if not args.overwrite and hand5_path.exists() and preflop_path.exists() and flop_path.exists():
+    if (
+        not args.overwrite
+        and hand5_path.exists()
+        and preflop_path.exists()
+        and flop_path.exists()
+    ):
         print("All LUT files already exist. Use --overwrite to regenerate.")
         return
 
@@ -161,9 +197,13 @@ def main() -> None:
     print(f"Saved: {hand5_path}")
 
     print("Generating preflop pair equities...")
-    pair_equity = generate_pair_equity(hand5_strength, samples_per_pair=args.pair_samples, seed=args.seed)
+    pair_equity = generate_pair_equity(
+        hand5_strength, samples_per_pair=args.pair_samples, seed=args.seed
+    )
     print("Generating preflop 5-card equities...")
-    preflop_equity = build_preflop_equity_from_pairs(pair_equity)
+    preflop_equity = build_preflop_equity_from_pairs_topk(
+        pair_equity, top_k=args.preflop_top_k
+    )
     np.save(preflop_path, preflop_equity)
     print(f"Saved: {preflop_path}")
 

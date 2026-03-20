@@ -55,6 +55,7 @@ class LUTStore:
         self.preflop_equity = self._load_preflop_equity()
         self.flop_cache: Dict[int, float] = self._load_flop_seed_table()
         self._premium_threshold = float(np.quantile(self.preflop_equity, 0.90))
+        self._aggressive_threshold = float(np.quantile(self.preflop_equity, 0.94))
 
     def _load_hand5_strength(self) -> np.ndarray:
         path = self.data_dir / "hand5_strength.npy"
@@ -122,6 +123,9 @@ class LUTStore:
 
     def is_premium_preflop(self, cards5: Sequence[int]) -> bool:
         return self.get_preflop_equity(cards5) >= self._premium_threshold
+
+    def is_aggressive_preflop(self, cards5: Sequence[int]) -> bool:
+        return self.get_preflop_equity(cards5) >= self._aggressive_threshold
 
     def get_flop_ev(self, keep_cards: Sequence[int], flop_cards: Sequence[int]) -> float | None:
         return self.flop_cache.get(pack_flop_key(keep_cards, flop_cards))

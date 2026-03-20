@@ -92,7 +92,7 @@ class TimeSupervisor:
     def __init__(
         self,
         total_hands: int = 1000,
-        full_threshold: float = 1.2,
+        full_threshold: float = 1.0,
         survival_threshold: float = 0.30,
     ) -> None:
         self.total_hands = total_hands
@@ -231,11 +231,7 @@ class OpponentModel:
 
 class DiscardEngine:
     def __init__(
-        self,
-        luts: LUTStore,
-        full_samples: int = 450,
-        fast_samples: int = 160,
-        flop_table: FlopDiscardTable | None = None,
+        self, luts: LUTStore, full_samples: int = 300, fast_samples: int = 150
     ) -> None:
         self.luts = luts
         self.full_samples = full_samples
@@ -245,102 +241,71 @@ class DiscardEngine:
 
     def _sample_size(self, mode: str, tavg: float | None = None) -> int:
         if mode == "full":
-            base = self.full_samples
-        elif mode == "fast":
-            base = self.fast_samples
-        else:
-            base = max(48, self.fast_samples // 2)
-
-        # Spend more compute while we have surplus clock.
-        if tavg is not None:
-            if mode == "full":
-                if tavg >= 1.6:
-                    base = int(base * 2.4)
-                elif tavg >= 1.2:
-                    base = int(base * 2.0)
-                elif tavg >= 0.9:
-                    base = int(base * 1.5)
-                elif tavg >= 0.7:
-                    base = int(base * 1.2)
-            elif mode == "fast":
-                if tavg >= 0.9:
-                    base = int(base * 1.35)
-                elif tavg >= 0.7:
-                    base = int(base * 1.15)
-
-        return max(32, min(2600, int(base)))
+            return self.full_samples
+        if mode == "fast":
+            return self.fast_samples
+        return max(100, self.fast_samples // 2)
 
     @staticmethod
-    def _heuristic_flop_ev(keep_cards: Sequence[int], flop_cards: Sequence[int]) -> float:
-        """
-        Cheap deterministic estimate for fast/survival paths.
-        Ranks: 0-7 = 2-9, 8 = Ace.  Suits: 0-2 (only 3 suits in 27-card deck).
-        """
-        cards = [int(c) for c in keep_cards] + [int(c) for c in flop_cards[:3]]
-        ranks = [c % 9 for c in cards]
-        suits = [c // 9 for c in cards]
-        keep_ranks = [c % 9 for c in (int(keep_cards[0]), int(keep_cards[1]))]
-        keep_suits = [c // 9 for c in (int(keep_cards[0]), int(keep_cards[1]))]
+    def _card_rank(card: int) -> int:
+        return int(card) % 9
 
+    @staticmethod
+    def _card_suit(card: int) -> int:
+        return int(card) // 9
+
+    @classmethod
+    def _is_high_pair(cls, keep_cards: Sequence[int]) -> bool:
+        if len(keep_cards) != 2:
+            return False
+        r0 = cls._card_rank(int(keep_cards[0]))
+        r1 = cls._card_rank(int(keep_cards[1]))
+        return r0 == r1 and r0 >= 6  # 8, 9, A in this deck encoding
+
+    @classmethod
+    def _made_two_pair_or_better(
+        cls, keep_cards: Sequence[int], flop_cards: Sequence[int]
+    ) -> bool:
+        cards = [int(c) for c in keep_cards] + [int(c) for c in flop_cards[:3]]
+        if len(cards) < 5:
+            return False
         rank_counts: dict[int, int] = {}
-        for r in ranks:
-            rank_counts[r] = rank_counts.get(r, 0) + 1
-        max_same_rank = max(rank_counts.values()) if rank_counts else 1
+        for card in cards:
+            rank = cls._card_rank(card)
+            rank_counts[rank] = rank_counts.get(rank, 0) + 1
+        if any(count >= 3 for count in rank_counts.values()):
+            return True
+        pair_count = sum(1 for count in rank_counts.values() if count >= 2)
+        return pair_count >= 2
+
+    @classmethod
+    def _made_straight_or_flush(
+        cls, keep_cards: Sequence[int], flop_cards: Sequence[int]
+    ) -> bool:
+        cards = [int(c) for c in keep_cards] + [int(c) for c in flop_cards[:3]]
+        if len(cards) < 5:
+            return False
 
         suit_counts: dict[int, int] = {}
-        for s in suits:
-            suit_counts[s] = suit_counts.get(s, 0) + 1
-        max_same_suit = max(suit_counts.values()) if suit_counts else 1
+        for card in cards:
+            suit = cls._card_suit(card)
+            suit_counts[suit] = suit_counts.get(suit, 0) + 1
+        if any(count >= 5 for count in suit_counts.values()):
+            return True
 
-        ev = 0.42
-
-        if max_same_rank >= 3:
-            ev += 0.20
-        elif max_same_rank >= 2:
-            n_pairs = sum(1 for v in rank_counts.values() if v >= 2)
-            if n_pairs >= 2:
-                ev += 0.15
+        rank_values = set()
+        for card in cards:
+            rank = cls._card_rank(card)
+            if rank == 8:  # Ace
+                rank_values.add(14)
             else:
-                ev += 0.10
-
-        if max_same_suit >= 5:
-            ev += 0.28
-        elif max_same_suit >= 4:
-            ev += 0.10
-        elif max_same_suit >= 3:
-            if keep_suits[0] == keep_suits[1]:
-                hero_suit = keep_suits[0]
-                if suit_counts.get(hero_suit, 0) >= 3:
-                    ev += 0.05
-
-        rank_set = set(ranks)
-        straight_windows = [
-            (0, 1, 2, 3, 4),
-            (1, 2, 3, 4, 5),
-            (2, 3, 4, 5, 6),
-            (3, 4, 5, 6, 7),
-            (4, 5, 6, 7, 8),
-            (8, 0, 1, 2, 3),
-        ]
-        best_consec = 0
-        for window in straight_windows:
-            match = sum(1 for r in window if r in rank_set)
-            if match > best_consec:
-                best_consec = match
-        if best_consec >= 5:
-            ev += 0.25
-        elif best_consec >= 4:
-            ev += 0.06
-        elif best_consec >= 3:
-            ev += 0.02
-
-        if keep_suits[0] == keep_suits[1]:
-            ev += 0.03
-
-        top_keep = max(keep_ranks)
-        ev += (top_keep / 8.0) * 0.06
-
-        return max(0.15, min(0.90, ev))
+                rank_values.add(rank + 2)
+        if 14 in rank_values:
+            rank_values.add(1)
+        for start in range(1, 11):
+            if all((start + offset) in rank_values for offset in range(5)):
+                return True
+        return False
 
     def _sample_equity(
         self,
@@ -440,7 +405,7 @@ class DiscardEngine:
         cached = self.luts.get_flop_ev_by_key(key)
         if cached is not None:
             return cached
-        discard_samples = min(self._sample_size(mode, tavg=tavg), 700)
+        discard_samples = min(self._sample_size(mode), 220)
         ev = self._sample_equity(
             hero_cards=keep_cards,
             known_board=flop_cards,
@@ -469,12 +434,59 @@ class DiscardEngine:
 
         best_pair = (0, 1)
         best_ev = -1.0
+        best_adjusted_ev = -1.0
+        best_is_high_pair = False
+        best_has_made_value = False
+        best_has_made_sf = False
+
+        best_high_pair: tuple[int, int] | None = None
+        best_high_pair_ev = -1.0
+        best_high_pair_adjusted_ev = -1.0
         for i, j in KEEP_INDEX_PAIRS:
             keep_cards = (cards[i], cards[j])
-            ev = self.get_or_estimate_flop_ev(keep_cards, flop, mode, tavg=tavg)
-            if ev > best_ev:
+            ev = self.get_or_estimate_flop_ev(keep_cards, flop, mode)
+            is_high_pair = self._is_high_pair(keep_cards)
+            has_made_value = self._made_two_pair_or_better(keep_cards, flop)
+            has_made_sf = self._made_straight_or_flush(keep_cards, flop)
+
+            adjusted_ev = ev
+            if is_high_pair:
+                adjusted_ev *= 1.15
+            if has_made_value:
+                adjusted_ev *= 1.10
+
+            if adjusted_ev > best_adjusted_ev:
+                best_adjusted_ev = adjusted_ev
                 best_ev = ev
                 best_pair = (i, j)
+                best_is_high_pair = is_high_pair
+                best_has_made_value = has_made_value
+                best_has_made_sf = has_made_sf
+            elif abs(adjusted_ev - best_adjusted_ev) <= 0.015:
+                # Tie-break close EV states toward immediate made-hand stability.
+                if (is_high_pair or has_made_value) and not (
+                    best_is_high_pair or best_has_made_value
+                ):
+                    best_adjusted_ev = adjusted_ev
+                    best_ev = ev
+                    best_pair = (i, j)
+                    best_is_high_pair = is_high_pair
+                    best_has_made_value = has_made_value
+                    best_has_made_sf = has_made_sf
+
+            if is_high_pair and adjusted_ev > best_high_pair_adjusted_ev:
+                best_high_pair_adjusted_ev = adjusted_ev
+                best_high_pair_ev = ev
+                best_high_pair = (i, j)
+
+        # Keep strong made pre-flop pairs unless the alternative is an immediate made straight/flush.
+        if (
+            best_high_pair is not None
+            and not best_is_high_pair
+            and not best_has_made_sf
+        ):
+            best_pair = best_high_pair
+            best_ev = best_high_pair_ev
         return (4, 0, best_pair[0], best_pair[1]), best_ev
 
     def opponent_lower_bound(
@@ -497,8 +509,14 @@ class DiscardEngine:
         cached = self._heuristic_cache.get(key)
         if cached is not None:
             return cached
-        ev = self._heuristic_flop_ev(keep_cards, flop_cards)
-        self._heuristic_cache[key] = ev
+        ev = self._sample_equity(
+            hero_cards=keep_cards,
+            known_board=flop_cards,
+            opponent_range=None,
+            samples=48,
+            seed=0xA5A5A5 ^ key,
+        )
+        self.luts.set_flop_ev_by_key(key, ev)
         return ev
 
     def narrowed_opponent_range(
@@ -523,15 +541,62 @@ class DiscardEngine:
         lower_bound = self.opponent_lower_bound(
             state.opp_discarded_cards, state.community_cards[:3], mode
         )
-        if lower_bound is None:
-            return candidates
-
-        filtered: list[tuple[int, int]] = []
         flop = state.community_cards[:3]
-        for combo in candidates:
-            if self._quick_flop_ev(combo, flop) >= lower_bound:
-                filtered.append(combo)
-        return filtered if filtered else candidates
+        combo_scores: dict[tuple[int, int], float] = {}
+        if lower_bound is None:
+            narrowed = candidates
+        else:
+            filtered: list[tuple[int, int]] = []
+            for combo in candidates:
+                score = self._quick_flop_ev(combo, flop)
+                combo_scores[combo] = score
+                if score >= lower_bound:
+                    filtered.append(combo)
+            narrowed = filtered if filtered else candidates
+
+        # Action-aware pressure trim: use continue cost pressure, not raw opp_bet.
+        pressure_ratio = state.continue_cost / max(1, state.pot_size)
+        action_pressure = state.street >= 2 and state.opp_last_action == "RAISE"
+        if state.street >= 3:
+            pressure_trigger = 0.20
+        elif state.street == 2:
+            pressure_trigger = 0.25
+        else:
+            pressure_trigger = 0.30
+
+        if (pressure_ratio >= pressure_trigger or action_pressure) and len(
+            narrowed
+        ) > 12:
+            if state.street >= 3:
+                if pressure_ratio >= 0.40:
+                    trim_fraction = 0.55
+                elif action_pressure:
+                    trim_fraction = 0.35
+                else:
+                    trim_fraction = 0.45
+            elif state.street == 2:
+                if pressure_ratio >= 0.35:
+                    trim_fraction = 0.45
+                elif action_pressure:
+                    trim_fraction = 0.28
+                else:
+                    trim_fraction = 0.35
+            else:
+                trim_fraction = 0.30
+            scored = [
+                (
+                    combo,
+                    combo_scores.get(combo, self._quick_flop_ev(combo, flop)),
+                )
+                for combo in narrowed
+            ]
+            scored.sort(key=lambda item: item[1], reverse=True)
+            keep_count = max(12, int(len(scored) * (1.0 - trim_fraction)))
+            pressure_narrowed = [combo for combo, _ in scored[:keep_count]]
+            if pressure_narrowed:
+                return pressure_narrowed
+
+        return narrowed
 
     def estimate_hero_equity(
         self,
@@ -639,6 +704,7 @@ class DecisionEngine:
 
         continue_cost = state.continue_cost
         pot = max(1, state.pot_size)
+        stack_commit = max(state.my_bet, state.opp_bet)
         pot_odds = (continue_cost / (pot + continue_cost)) if continue_cost > 0 else 0.0
         jitter = self._jitter()
 
@@ -650,15 +716,10 @@ class DecisionEngine:
 
         # --- No continue cost: check or bet ---
         if continue_cost == 0:
-            if state.street >= 1:
-                value_threshold = 0.60 if opp_fold_rate >= 0.40 else 0.64
-            else:
-                value_threshold = 0.68 if opp_fold_rate >= 0.40 else 0.71
-            value_threshold += jitter
-
-            if my_ev > value_threshold and self._is_valid(state, raise_action):
-                if self._rng.random() < 0.12 and self._is_valid(state, check):
-                    return (check, 0, 0, 0)
+            free_raise_threshold = 0.65
+            if state.street >= 2 and stack_commit >= 60:
+                free_raise_threshold = 0.72
+            if my_ev > free_raise_threshold and self._is_valid(state, raise_action):
                 return (
                     raise_action,
                     self._raise_amount(state, my_ev - 0.5, mode),
@@ -694,40 +755,47 @@ class DecisionEngine:
                 )
             return (fold, 0, 0, 0)
 
-        # --- Facing a bet: preflop escalation tiers ---
-        if state.street == 0:
-            call_thresh, raise_thresh = self._preflop_tightness(
-                state.my_bet, pot_odds, street_margin, is_premium
-            )
-            call_thresh += jitter
-            raise_thresh += jitter
+        bet_ratio = continue_cost / pot
+        discount = max(0.20, 1.0 - 0.35 * bet_ratio)
+        effective_ev = my_ev * discount
 
-            if state.my_bet >= 20 and not is_premium:
-                if my_ev >= call_thresh and self._is_valid(state, call):
-                    return (call, 0, 0, 0)
-                if self._is_valid(state, fold):
-                    return (fold, 0, 0, 0)
-                if self._is_valid(state, check):
-                    return (check, 0, 0, 0)
-                return (call if self._is_valid(state, call) else fold, 0, 0, 0)
+        street_risk = 0.0
+        if state.street == 2:
+            street_risk += 0.02
+        elif state.street >= 3:
+            street_risk += 0.04
+        if state.street >= 2 and state.opp_last_action == "RAISE":
+            street_risk += 0.02 if state.street == 2 else 0.04
+        if bet_ratio > 0.50:
+            street_risk += 0.02
+        if bet_ratio > 0.80:
+            street_risk += 0.02
+        if state.street >= 3:
+            if bet_ratio > 0.25:
+                street_risk += 0.02
+            if bet_ratio > 0.45:
+                street_risk += 0.02
 
-            if my_ev > raise_thresh and self._is_valid(state, raise_action):
-                return (raise_action, self._raise_amount(state, my_ev - 0.5, mode), 0, 0)
-            if my_ev >= call_thresh and self._is_valid(state, call):
-                return (call, 0, 0, 0)
-            if self._is_valid(state, fold):
-                return (fold, 0, 0, 0)
-            if self._is_valid(state, check):
-                return (check, 0, 0, 0)
-            return (call if self._is_valid(state, call) else fold, 0, 0, 0)
+        commitment_risk = 0.0
+        if stack_commit >= 60:
+            commitment_risk += 0.04 if state.street <= 2 else 0.02
+        if stack_commit >= 80:
+            commitment_risk += 0.06 if state.street <= 2 else 0.04
 
-        # --- Facing a bet: post-flop ---
-        raise_threshold = max(0.82, pot_odds + 0.35) + jitter
-        call_threshold = pot_odds + street_margin + jitter
+        raise_threshold = 0.80
+        if state.street == 2:
+            raise_threshold += 0.03
+        elif state.street >= 3:
+            raise_threshold += 0.02
+        if stack_commit >= 60:
+            raise_threshold += 0.03
+        if stack_commit >= 80:
+            raise_threshold += 0.04
 
         if my_ev > raise_threshold and self._is_valid(state, raise_action):
             return (raise_action, self._raise_amount(state, my_ev - 0.5, mode), 0, 0)
-        if my_ev >= call_threshold and self._is_valid(state, call):
+        required_call_ev = pot_odds + margin + street_risk + commitment_risk
+        if effective_ev >= required_call_ev and self._is_valid(state, call):
             return (call, 0, 0, 0)
         if self._is_valid(state, fold):
             return (fold, 0, 0, 0)
