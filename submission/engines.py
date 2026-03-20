@@ -87,8 +87,8 @@ class TimeSupervisor:
     def __init__(
         self,
         total_hands: int = 1000,
-        full_threshold: float = 0.8,
-        survival_threshold: float = 0.20,
+        full_threshold: float = 1.0,
+        survival_threshold: float = 0.30,
     ) -> None:
         self.total_hands = total_hands
         self.full_threshold = full_threshold
@@ -194,7 +194,7 @@ class OpponentModel:
 
 class DiscardEngine:
     def __init__(
-        self, luts: LUTStore, full_samples: int = 375, fast_samples: int = 200
+        self, luts: LUTStore, full_samples: int = 300, fast_samples: int = 150
     ) -> None:
         self.luts = luts
         self.full_samples = full_samples
@@ -205,7 +205,7 @@ class DiscardEngine:
             return self.full_samples
         if mode == "fast":
             return self.fast_samples
-        return max(120, self.fast_samples // 2)
+        return max(100, self.fast_samples // 2)
 
     @staticmethod
     def _card_rank(card: int) -> int:
@@ -306,8 +306,8 @@ class DiscardEngine:
         # Exact compare when no future board cards remain and range is moderate.
         if need_board == 0 and len(candidate_range) <= 200:
             wins = ties = 0.0
+            my_score = self.luts.evaluate_7card_score(hero_cards, board_known)
             for opp_cards in candidate_range:
-                my_score = self.luts.evaluate_7card_score(hero_cards, board_known)
                 opp_score = self.luts.evaluate_7card_score(opp_cards, board_known)
                 if my_score < opp_score:
                     wins += 1.0
@@ -348,7 +348,7 @@ class DiscardEngine:
         cached = self.luts.get_flop_ev_by_key(key)
         if cached is not None:
             return cached
-        discard_samples = min(self._sample_size(mode), 300)
+        discard_samples = min(self._sample_size(mode), 220)
         ev = self._sample_equity(
             hero_cards=keep_cards,
             known_board=flop_cards,
@@ -371,6 +371,7 @@ class DiscardEngine:
         best_ev = -1.0
         best_adjusted_ev = -1.0
         best_is_high_pair = False
+        best_has_made_value = False
         best_has_made_sf = False
 
         best_high_pair: tuple[int, int] | None = None
@@ -394,7 +395,19 @@ class DiscardEngine:
                 best_ev = ev
                 best_pair = (i, j)
                 best_is_high_pair = is_high_pair
+                best_has_made_value = has_made_value
                 best_has_made_sf = has_made_sf
+            elif abs(adjusted_ev - best_adjusted_ev) <= 0.015:
+                # Tie-break close EV states toward immediate made-hand stability.
+                if (is_high_pair or has_made_value) and not (
+                    best_is_high_pair or best_has_made_value
+                ):
+                    best_adjusted_ev = adjusted_ev
+                    best_ev = ev
+                    best_pair = (i, j)
+                    best_is_high_pair = is_high_pair
+                    best_has_made_value = has_made_value
+                    best_has_made_sf = has_made_sf
 
             if is_high_pair and adjusted_ev > best_high_pair_adjusted_ev:
                 best_high_pair_adjusted_ev = adjusted_ev
@@ -435,7 +448,7 @@ class DiscardEngine:
             hero_cards=keep_cards,
             known_board=flop_cards,
             opponent_range=None,
-            samples=80,
+            samples=48,
             seed=0xA5A5A5 ^ key,
         )
         self.luts.set_flop_ev_by_key(key, ev)
@@ -475,10 +488,33 @@ class DiscardEngine:
                     filtered.append(combo)
             narrowed = filtered if filtered else candidates
 
-        # Action-aware pressure trim: remove the weakest tail under large overbets.
-        pressure_ratio = state.opp_bet / max(1, state.pot_size)
-        if pressure_ratio > 1.0 and len(narrowed) > 12:
-            trim_fraction = 0.50 if pressure_ratio >= 1.5 else 0.45
+        # Action-aware pressure trim: use continue cost pressure, not raw opp_bet.
+        pressure_ratio = state.continue_cost / max(1, state.pot_size)
+        action_pressure = state.street >= 2 and state.opp_last_action == "RAISE"
+        if state.street >= 3:
+            pressure_trigger = 0.20
+        elif state.street == 2:
+            pressure_trigger = 0.25
+        else:
+            pressure_trigger = 0.30
+
+        if (pressure_ratio >= pressure_trigger or action_pressure) and len(narrowed) > 12:
+            if state.street >= 3:
+                if pressure_ratio >= 0.40:
+                    trim_fraction = 0.55
+                elif action_pressure:
+                    trim_fraction = 0.35
+                else:
+                    trim_fraction = 0.45
+            elif state.street == 2:
+                if pressure_ratio >= 0.35:
+                    trim_fraction = 0.45
+                elif action_pressure:
+                    trim_fraction = 0.28
+                else:
+                    trim_fraction = 0.35
+            else:
+                trim_fraction = 0.30
             scored = [
                 (
                     combo,
@@ -557,10 +593,14 @@ class DecisionEngine:
 
         continue_cost = state.continue_cost
         pot = max(1, state.pot_size)
+        stack_commit = max(state.my_bet, state.opp_bet)
         pot_odds = (continue_cost / (pot + continue_cost)) if continue_cost > 0 else 0.0
 
         if continue_cost == 0:
-            if my_ev > 0.65 and self._is_valid(state, raise_action):
+            free_raise_threshold = 0.65
+            if state.street >= 2 and stack_commit >= 60:
+                free_raise_threshold = 0.72
+            if my_ev > free_raise_threshold and self._is_valid(state, raise_action):
                 return (
                     raise_action,
                     self._raise_amount(state, my_ev - 0.5, mode),
@@ -584,9 +624,43 @@ class DecisionEngine:
         discount = max(0.20, 1.0 - 0.35 * bet_ratio)
         effective_ev = my_ev * discount
 
-        if my_ev > 0.80 and self._is_valid(state, raise_action):
+        street_risk = 0.0
+        if state.street == 2:
+            street_risk += 0.02
+        elif state.street >= 3:
+            street_risk += 0.04
+        if state.street >= 2 and state.opp_last_action == "RAISE":
+            street_risk += 0.02 if state.street == 2 else 0.04
+        if bet_ratio > 0.50:
+            street_risk += 0.02
+        if bet_ratio > 0.80:
+            street_risk += 0.02
+        if state.street >= 3:
+            if bet_ratio > 0.25:
+                street_risk += 0.02
+            if bet_ratio > 0.45:
+                street_risk += 0.02
+
+        commitment_risk = 0.0
+        if stack_commit >= 60:
+            commitment_risk += 0.04 if state.street <= 2 else 0.02
+        if stack_commit >= 80:
+            commitment_risk += 0.06 if state.street <= 2 else 0.04
+
+        raise_threshold = 0.80
+        if state.street == 2:
+            raise_threshold += 0.03
+        elif state.street >= 3:
+            raise_threshold += 0.02
+        if stack_commit >= 60:
+            raise_threshold += 0.03
+        if stack_commit >= 80:
+            raise_threshold += 0.04
+
+        if my_ev > raise_threshold and self._is_valid(state, raise_action):
             return (raise_action, self._raise_amount(state, my_ev - 0.5, mode), 0, 0)
-        if effective_ev >= (pot_odds + margin) and self._is_valid(state, call):
+        required_call_ev = pot_odds + margin + street_risk + commitment_risk
+        if effective_ev >= required_call_ev and self._is_valid(state, call):
             return (call, 0, 0, 0)
         if self._is_valid(state, fold):
             return (fold, 0, 0, 0)

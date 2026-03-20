@@ -54,7 +54,7 @@ class LUTStore:
         self.preflop_equity = self._load_preflop_equity()
         self.flop_cache: Dict[int, float] = self._load_flop_seed_table()
         self._premium_threshold = float(np.quantile(self.preflop_equity, 0.90))
-        self._aggressive_threshold = float(np.quantile(self.preflop_equity, 0.85))
+        self._aggressive_threshold = float(np.quantile(self.preflop_equity, 0.94))
 
     def _load_hand5_strength(self) -> np.ndarray:
         path = self.data_dir / "hand5_strength.npy"

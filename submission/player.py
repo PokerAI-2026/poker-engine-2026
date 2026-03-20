@@ -126,7 +126,17 @@ class PlayerAgent(Agent):
         call = self.action_types.CALL.value
         check = self.action_types.CHECK.value
 
-        if self._is_valid(state.valid_actions, raise_action):
+        # Force initiative mainly in open spots; avoid auto 3-bet wars.
+        if state.continue_cost == 0 and self._is_valid(state.valid_actions, raise_action):
+            target = max(state.min_raise, min(state.max_raise, max(2, state.min_raise)))
+            return (raise_action, target, 0, 0)
+        if (
+            state.continue_cost > 0
+            and self.luts.is_premium_preflop(state.my_cards[:5])
+            and state.continue_cost <= max(2, state.pot_size // 5)
+            and state.min_raise <= 4
+            and self._is_valid(state.valid_actions, raise_action)
+        ):
             target = max(state.min_raise, min(state.max_raise, max(2, state.min_raise)))
             return (raise_action, target, 0, 0)
         if state.continue_cost > 0 and self._is_valid(state.valid_actions, call):
@@ -193,7 +203,7 @@ class PlayerAgent(Agent):
                 )
 
             opponent_range = None
-            if mode == "full":
+            if mode == "full" and state.street >= 2 and state.continue_cost > 0:
                 opponent_range = self.discard_engine.narrowed_opponent_range(
                     state, mode
                 )
